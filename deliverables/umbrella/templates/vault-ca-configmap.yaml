@@ -1,0 +1,22 @@
+{{- if .Values.vaultAgent.vault.caCert }}
+{{/*
+ConfigMap holding the Vault server's CA certificate so the agent can make
+verified HTTPS calls to Vault. Mounted (optional) into every agent container at
+/vault/ca; VAULT_CACERT then points at /vault/ca/ca.crt.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camunda-vault-agent-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  ca.crt: |
+    {{- .Values.vaultAgent.vault.caCert | nindent 4 }}
+{{- end }}

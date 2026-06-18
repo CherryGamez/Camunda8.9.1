@@ -33,7 +33,10 @@ vaultAgent:
     authPath: kubernetes          # Vault Kubernetes auth mount path
     role: camunda                 # Vault role bound to the SA above
     namespace: ""                 # Vault Enterprise namespace (optional)
-    caConfigMap: ""               # ConfigMap holding Vault CA under key ca.crt (optional)
+    # Vault TLS: paste your Vault server's CA certificate (PEM) here to let the
+    # agent make verified HTTPS calls to Vault. Leave empty for a publicly-trusted
+    # CA (the alpine image ships ca-certificates) or set skipVerify for testing.
+    caCert: ""
     skipVerify: false
 
   intervalSeconds: 300            # how often the watch sidecar re-checks Vault
@@ -80,8 +83,10 @@ _vaultAgentTemplates:
       emptyDir: {}
     - name: vault-tmp
       emptyDir: {}
-
-  # Mounted into the MAIN application container (CA available for optional TLS trust).
+    - name: vault-ca
+      configMap:
+        name: camunda-vault-agent-ca
+        optional: true
   appMounts: &agentAppMounts
     - name: vault-tls
       mountPath: /vault/tls
@@ -135,6 +140,9 @@ _vaultAgentTemplates:
           mountPath: /vault/secrets
         - name: vault-tmp
           mountPath: /tmp
+        - name: vault-ca
+          mountPath: /vault/ca
+          readOnly: true
       securityContext: *agentSecCtx
 
   sidecars: &agentSidecar
@@ -159,6 +167,9 @@ _vaultAgentTemplates:
           mountPath: /vault/secrets
         - name: vault-tmp
           mountPath: /tmp
+        - name: vault-ca
+          mountPath: /vault/ca
+          readOnly: true
       resources:
         requests: { cpu: "10m", memory: "32Mi" }
         limits: { cpu: "100m", memory: "64Mi" }

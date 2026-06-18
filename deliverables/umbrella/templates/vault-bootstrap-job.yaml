@@ -56,7 +56,7 @@ spec:
               readOnly: true
             - name: vault-tmp
               mountPath: /tmp
-            {{- if $va.vault.caConfigMap }}
+            {{- if $va.vault.caCert }}
             - name: vault-ca
               mountPath: /vault/ca
               readOnly: true
@@ -79,8 +79,8 @@ spec:
             name: camunda-vault-agent-config
         - name: vault-tmp
           emptyDir: {}
-        {{- if $va.vault.caConfigMap }}
+        {{- if $va.vault.caCert }}
         - name: vault-ca
           configMap:
-            name: {{ $va.vault.caConfigMap }}
+            name: camunda-vault-agent-ca
         {{- end }}

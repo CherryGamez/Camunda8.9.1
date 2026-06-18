@@ -39,7 +39,7 @@ data:
   VAULT_ROLE: {{ $va.vault.role | quote }}
   VAULT_NAMESPACE: {{ $va.vault.namespace | quote }}
   VAULT_SKIP_VERIFY: {{ $va.vault.skipVerify | quote }}
-  {{- if $va.vault.caConfigMap }}
+  {{- if $va.vault.caCert }}
   VAULT_CACERT: "/vault/ca/ca.crt"
   {{- end }}
   CONFIG_FILE: "/etc/camunda-vault-agent/config.json"
