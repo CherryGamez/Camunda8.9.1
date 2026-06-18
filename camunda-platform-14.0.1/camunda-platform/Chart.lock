@@ -1,0 +1,18 @@
+dependencies:
+- name: keycloak
+  repository: file://../keycloak-24
+  version: 24.9.1
+- name: postgresql
+  repository: file://../identity-postgresql-16
+  version: 16.7.27
+- name: web-modeler-postgresql
+  repository: file://../web-modeler-postgresql-15
+  version: 15.5.28
+- name: elasticsearch
+  repository: file://../elasticsearch-21
+  version: 21.6.3
+- name: common
+  repository: file://../common-2
+  version: 2.37.0
+digest: sha256:1b621551559df64e8ed5fd9968d232ceae2fd6a3409fcd2da81111d17537f90b
+generated: "2026-04-22T11:28:09.838988688Z"
