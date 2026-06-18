@@ -32,12 +32,16 @@ functionality, fetch secrets for the module and restart it.
 - RBAC: create + get/update/patch on the single `camunda-credentials` secret. No more.
 
 ## Status — implemented & verified (2026-06-18)
-- `helm dependency build` / `helm lint` / `helm template`: clean (62 manifests).
-- Agent verified against a **live Vault dev server**: login(token), KV v2 read,
-  create/patch logic (file path), idempotency, rotation detection. `gencert` verified
-  (subject + SANs). Post-render injects `shareProcessNamespace` into all 6 modules.
-- All component Secret refs resolve to `camunda-credentials` with correct keys
-  (ES, Keycloak admin, Keycloak-PG, WebModeler-PG, Orchestration, Optimize).
+- `helm dependency build` / `helm lint` / `helm template`: clean (renders with and
+  without Vault CA; zero-RBAC and NetworkPolicy toggles validated).
+- Agent verified against a **live TLS Vault**: k8s/token login, **verified HTTPS
+  with custom CA**, clean fatal errors on TLS/connection failure (no fallthrough),
+  skip-verify, KV v2 read, create/patch (file path), idempotency, rotation.
+  `gencert` verified (subject + SANs). Post-render injects `shareProcessNamespace`
+  into all 6 modules. All component Secret refs resolve to `camunda-credentials`.
+- Security hardening added: `vaultAgent.rbac.create` toggle (zero-RBAC posture),
+  `vaultAgent.networkPolicy.enabled` (bootstrap egress: DNS+Vault+API only),
+  `vaultAgent.vault.caCert` (HTTPS CA mounted into every agent container).
 
 ## NOT verified here (needs a real cluster)
 - Full Camunda end-to-end boot on IBM Cloud (no cluster/Vault/registry in build env).

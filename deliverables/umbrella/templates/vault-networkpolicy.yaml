@@ -1,0 +1,51 @@
+{{- if .Values.vaultAgent.networkPolicy.enabled }}
+{{- $np := .Values.vaultAgent.networkPolicy }}
+{{/*
+Egress NetworkPolicy for the dedicated Vault bootstrap Job pod.
+Allows ONLY: DNS resolution, Vault (vaultPort), and the Kubernetes API server
+(apiServerPort). Everything else is denied. This is the most security-team
+friendly footprint for an air-gapped, policy-restricted cluster.
+
+Note: the per-module `vault-agent` sidecars share their module's pod network,
+so their egress cannot be isolated from the application here — apply a
+module-level policy if you need to constrain those too.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: camunda-vault-agent-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-16"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: vault-agent-bootstrap
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # HashiCorp Vault
+    - to:
+        {{- if $np.vaultCidr }}
+        - ipBlock:
+            cidr: {{ $np.vaultCidr | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $np.vaultPort }}
+    # Kubernetes API server (to create/patch the camunda-credentials Secret)
+    - ports:
+        - protocol: TCP
+          port: {{ $np.apiServerPort }}
+{{- end }}

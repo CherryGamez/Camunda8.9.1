@@ -66,6 +66,32 @@ HashiCorp Vault (KV v2)                      Kubernetes
   `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, all capabilities dropped.
 - Everything is mirror-able into a private registry; no external pulls at runtime.
 
+## Security hardening toggles
+
+| Toggle | Default | Effect |
+|---|---|---|
+| `vaultAgent.rbac.create` | `true` | Creates the Role/RoleBinding (create + get/update/patch on the single `camunda-credentials` Secret). Set **`false`** for a zero-RBAC agent. |
+| `vaultAgent.networkPolicy.enabled` | `true` | Locks the dedicated **bootstrap Job** pod's egress to DNS + Vault (`vaultPort`) + API server (`apiServerPort`) only. |
+| `vaultAgent.vault.caCert` | `""` | Vault CA (PEM) for verified HTTPS; published as `camunda-vault-agent-ca` and mounted into every agent container. |
+| `vaultAgent.restart.mode` | `signal` | `signal` = in-pod SIGTERM (no restart RBAC); `rollout` = scoped workload patch; `none`. |
+
+### Zero-RBAC posture (honest scope)
+Setting `rbac.create=false` removes **all** Kubernetes RBAC for the agent. To use
+it end-to-end you must **also** switch secret delivery from the Kubernetes Secret
+to the shared-**file** mechanism, because writing a Secret needs API rights:
+
+- move each mapping from `entries:` to `files:` (the agent writes the value to a
+  shared volume), and
+- point each component at that file (bitnami `*_FILE` env / app config).
+
+The agent fully supports file mode (verified), and `restart.mode=signal` needs no
+RBAC. However, **rewiring every bundled component (Elasticsearch / Keycloak /
+PostgreSQL / Camunda apps) to read its password from a file instead of a k8s
+Secret is component-specific and must be validated on a real cluster** — those
+subcharts consume a Secret by default. Therefore the shipped default keeps the
+Kubernetes-Secret design (RBAC scoped to one Secret), which is already minimal,
+and the file/zero-RBAC path is provided as a documented, opt-in alternative.
+
 ## Trade-offs / notes
 
 - **Signal restart** requires `shareProcessNamespace: true`, injected by the

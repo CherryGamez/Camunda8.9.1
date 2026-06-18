@@ -28,6 +28,22 @@ vaultAgent:
 
   serviceAccountName: camunda-vault-agent
 
+  # RBAC: the Role/RoleBinding grant create + get/update/patch on the single
+  # `camunda-credentials` Secret (needed for the Kubernetes-Secret delivery mode).
+  # Set create=false for a ZERO-RBAC posture: use the `files` mapping (shared
+  # volume) for delivery + restart.mode=signal (no API calls at all).
+  rbac:
+    create: true
+
+  # NetworkPolicy locks the dedicated bootstrap Job pod's egress down to just
+  # DNS + Vault + the Kubernetes API server. (Sidecars share the module pod's
+  # network, so restrict those at the module level if required.)
+  networkPolicy:
+    enabled: true
+    vaultPort: 8200
+    apiServerPort: 443
+    vaultCidr: ""   # optional CIDR for Vault; empty = any destination on vaultPort
+
   vault:
     addr: "https://vault.vault.svc.cluster.local:8200"
     authPath: kubernetes          # Vault Kubernetes auth mount path
