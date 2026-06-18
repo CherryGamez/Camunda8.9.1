@@ -1,0 +1,86 @@
+{{- $va := .Values.vaultAgent -}}
+{{/*
+Bootstrap Job: runs `camunda-vault-agent fetch` once, before the main release
+resources are created, so that the `camunda-credentials` Secret already exists
+when Elasticsearch / Keycloak / PostgreSQL pods boot and resolve it via env.
+
+It is a pre-install / pre-upgrade hook (weight 0, after the SA/RBAC/ConfigMap
+hooks above). Idempotent: on every install/upgrade it reconciles the secret.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: camunda-vault-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: camunda-platform
+        app.kubernetes.io/component: vault-agent-bootstrap
+    spec:
+      serviceAccountName: {{ $va.serviceAccountName }}
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vault-bootstrap
+          image: {{ $va.image | quote }}
+          imagePullPolicy: {{ $va.imagePullPolicy }}
+          args: ["fetch"]
+          envFrom:
+            - configMapRef:
+                name: camunda-vault-agent-env
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: vault-agent-config
+              mountPath: /etc/camunda-vault-agent
+              readOnly: true
+            - name: vault-tmp
+              mountPath: /tmp
+            {{- if $va.vault.caConfigMap }}
+            - name: vault-ca
+              mountPath: /vault/ca
+              readOnly: true
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests: { cpu: "10m", memory: "32Mi" }
+            limits: { cpu: "200m", memory: "64Mi" }
+      volumes:
+        - name: vault-agent-config
+          configMap:
+            name: camunda-vault-agent-config
+        - name: vault-tmp
+          emptyDir: {}
+        {{- if $va.vault.caConfigMap }}
+        - name: vault-ca
+          configMap:
+            name: {{ $va.vault.caConfigMap }}
+        {{- end }}

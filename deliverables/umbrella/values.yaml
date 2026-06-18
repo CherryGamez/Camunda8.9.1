@@ -1,0 +1,346 @@
+# =============================================================================
+# Camunda 8.9 Self-Managed + HashiCorp Vault — Umbrella values
+# -----------------------------------------------------------------------------
+# All PostgreSQL / Keycloak / Elasticsearch passwords are sourced DYNAMICALLY
+# from HashiCorp Vault by the `camunda-vault-agent` sidecar (Kubernetes auth,
+# pod ServiceAccount). The agent reconciles them into ONE Kubernetes Secret
+# (`camunda-credentials`) which every component already references by default.
+#
+# Conventions assumed by this file (change in lock-step if you customise):
+#   * Release name : camunda      (helm install camunda ...)
+#   * Namespace    : camunda
+#   * Service names then become camunda-elasticsearch, camunda-orchestration, ...
+#
+# IMPORTANT: the sidecar/init container `image:` below is a LITERAL (Helm does
+# not template values passed down to subcharts). Keep it in sync with
+# `vaultAgent.image`.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Settings consumed by THIS umbrella chart's own templates
+# (ServiceAccount, RBAC, ConfigMaps, Vault bootstrap Job).
+# -----------------------------------------------------------------------------
+vaultAgent:
+  # Container image for the agent (build from ./vault-sidecar and push to your
+  # private/air-gapped registry, e.g. icr.io/<namespace>/camunda-vault-agent).
+  image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+  imagePullPolicy: IfNotPresent
+
+  serviceAccountName: camunda-vault-agent
+
+  vault:
+    addr: "https://vault.vault.svc.cluster.local:8200"
+    authPath: kubernetes          # Vault Kubernetes auth mount path
+    role: camunda                 # Vault role bound to the SA above
+    namespace: ""                 # Vault Enterprise namespace (optional)
+    caConfigMap: ""               # ConfigMap holding Vault CA under key ca.crt (optional)
+    skipVerify: false
+
+  intervalSeconds: 300            # how often the watch sidecar re-checks Vault
+  secretName: camunda-credentials
+
+  restart:
+    mode: signal                  # signal | rollout | none
+    processMatch: java            # for signal mode (the Camunda JVM)
+
+  # KV v2 read paths (note the `/data/` segment) -> Kubernetes Secret keys.
+  mappings:
+    - vaultPath: secret/data/camunda/elasticsearch
+      field: password
+      secretKey: elasticsearch-password
+    - vaultPath: secret/data/camunda/keycloak
+      field: admin-password
+      secretKey: identity-keycloak-admin-password
+    - vaultPath: secret/data/camunda/postgres/keycloak
+      field: admin-password
+      secretKey: identity-keycloak-postgresql-admin-password
+    - vaultPath: secret/data/camunda/postgres/keycloak
+      field: user-password
+      secretKey: identity-keycloak-postgresql-user-password
+    - vaultPath: secret/data/camunda/postgres/webmodeler
+      field: admin-password
+      secretKey: web-modeler-postgresql-admin-password
+    - vaultPath: secret/data/camunda/postgres/webmodeler
+      field: user-password
+      secretKey: web-modeler-postgresql-user-password
+
+# -----------------------------------------------------------------------------
+# YAML anchors: the agent init-containers / sidecar / volumes are identical for
+# every Camunda application module, so we define them once and reuse below.
+# (This top-level key is not a subchart; Helm simply ignores it.)
+# -----------------------------------------------------------------------------
+_vaultAgentTemplates:
+  volumes: &agentVolumes
+    - name: vault-agent-config
+      configMap:
+        name: camunda-vault-agent-config
+    - name: vault-shared
+      emptyDir: {}
+    - name: vault-tls
+      emptyDir: {}
+    - name: vault-tmp
+      emptyDir: {}
+
+  # Mounted into the MAIN application container (CA available for optional TLS trust).
+  appMounts: &agentAppMounts
+    - name: vault-tls
+      mountPath: /vault/tls
+      readOnly: true
+
+  initContainers: &agentInit
+    # 1) Generate a self-signed certificate into the shared /tls volume.
+    - name: vault-gencert
+      image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+      imagePullPolicy: IfNotPresent
+      args: ["gencert"]
+      env:
+        - name: CERT_DIR
+          value: /tls
+        - name: CERT_CN
+          value: camunda
+        - name: CERT_SANS
+          value: "*.camunda.svc.cluster.local,*.camunda.svc,localhost,127.0.0.1"
+      volumeMounts:
+        - name: vault-tls
+          mountPath: /tls
+        - name: vault-tmp
+          mountPath: /tmp
+      securityContext: &agentSecCtx
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 1001
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+    # 2) Fetch secrets from Vault and reconcile camunda-credentials before the app boots.
+    - name: vault-fetch
+      image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+      imagePullPolicy: IfNotPresent
+      args: ["fetch"]
+      envFrom:
+        - configMapRef:
+            name: camunda-vault-agent-env
+      env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      volumeMounts:
+        - name: vault-agent-config
+          mountPath: /etc/camunda-vault-agent
+          readOnly: true
+        - name: vault-shared
+          mountPath: /vault/secrets
+        - name: vault-tmp
+          mountPath: /tmp
+      securityContext: *agentSecCtx
+
+  sidecars: &agentSidecar
+    # Watches Vault; on change updates camunda-credentials and restarts the module.
+    - name: vault-agent
+      image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+      imagePullPolicy: IfNotPresent
+      args: ["watch"]
+      envFrom:
+        - configMapRef:
+            name: camunda-vault-agent-env
+      env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      volumeMounts:
+        - name: vault-agent-config
+          mountPath: /etc/camunda-vault-agent
+          readOnly: true
+        - name: vault-shared
+          mountPath: /vault/secrets
+        - name: vault-tmp
+          mountPath: /tmp
+      resources:
+        requests: { cpu: "10m", memory: "32Mi" }
+        limits: { cpu: "100m", memory: "64Mi" }
+      securityContext: *agentSecCtx
+
+# =============================================================================
+# Camunda Platform subchart values
+# =============================================================================
+camunda-platform:
+
+  global:
+    security:
+      authentication:
+        method: oidc
+    identity:
+      auth:
+        enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Management Identity
+  # ---------------------------------------------------------------------------
+  identity:
+    enabled: true
+    serviceAccount:
+      enabled: false
+      name: camunda-vault-agent
+    initContainers: *agentInit
+    sidecars: *agentSidecar
+    extraVolumes: *agentVolumes
+    extraVolumeMounts: *agentAppMounts
+
+  # ---------------------------------------------------------------------------
+  # Internal Keycloak (+ its embedded PostgreSQL).
+  # Passwords come from camunda-credentials (chart default existingSecret).
+  # ---------------------------------------------------------------------------
+  identityKeycloak:
+    enabled: true
+    auth:
+      adminUser: admin
+      existingSecret: camunda-credentials
+      passwordSecretKey: identity-keycloak-admin-password
+    postgresql:
+      auth:
+        existingSecret: camunda-credentials
+        secretKeys:
+          adminPasswordKey: identity-keycloak-postgresql-admin-password
+          userPasswordKey: identity-keycloak-postgresql-user-password
+
+  # Identity uses Keycloak's database, so the standalone Identity Postgres is off.
+  identityPostgresql:
+    enabled: false
+
+  # ---------------------------------------------------------------------------
+  # Orchestration cluster (Zeebe broker/gateway + Operate + Tasklist).
+  # Secondary storage = Elasticsearch; ES password from camunda-credentials.
+  # ---------------------------------------------------------------------------
+  orchestration:
+    enabled: true
+    serviceAccount:
+      enabled: false
+      name: camunda-vault-agent
+    replicas: 1
+    clusterSize: "1"
+    partitionCount: "1"
+    replicationFactor: "1"
+    pvcSize: 10Gi
+    data:
+      secondaryStorage:
+        type: elasticsearch
+        elasticsearch:
+          url: http://camunda-elasticsearch:9200
+          auth:
+            username: elastic
+            secret:
+              existingSecret: camunda-credentials
+              existingSecretKey: elasticsearch-password
+    initContainers: *agentInit
+    sidecars: *agentSidecar
+    extraVolumes: *agentVolumes
+    extraVolumeMounts: *agentAppMounts
+
+  # ---------------------------------------------------------------------------
+  # Connectors
+  # ---------------------------------------------------------------------------
+  connectors:
+    enabled: true
+    serviceAccount:
+      enabled: false
+      name: camunda-vault-agent
+    inbound:
+      mode: credentials
+    initContainers: *agentInit
+    sidecars: *agentSidecar
+    extraVolumes: *agentVolumes
+    extraVolumeMounts: *agentAppMounts
+
+  # ---------------------------------------------------------------------------
+  # Optimize (Elasticsearch password from camunda-credentials)
+  # ---------------------------------------------------------------------------
+  optimize:
+    enabled: true
+    serviceAccount:
+      enabled: false
+      name: camunda-vault-agent
+    database:
+      elasticsearch:
+        enabled: true
+        url:
+          protocol: http
+          host: camunda-elasticsearch
+          port: 9200
+        auth:
+          username: elastic
+          secret:
+            existingSecret: camunda-credentials
+            existingSecretKey: elasticsearch-password
+    initContainers: *agentInit
+    sidecars: *agentSidecar
+    extraVolumes: *agentVolumes
+    extraVolumeMounts: *agentAppMounts
+
+  # ---------------------------------------------------------------------------
+  # Web Modeler (+ dedicated PostgreSQL; password from camunda-credentials)
+  # ---------------------------------------------------------------------------
+  webModeler:
+    enabled: true
+    restapi:
+      mail:
+        fromAddress: noreply@camunda.example.com
+      initContainers: *agentInit
+      sidecars: *agentSidecar
+      extraVolumes: *agentVolumes
+      extraVolumeMounts: *agentAppMounts
+
+  webModelerPostgresql:
+    enabled: true
+    auth:
+      existingSecret: camunda-credentials
+      secretKeys:
+        adminPasswordKey: web-modeler-postgresql-admin-password
+        userPasswordKey: web-modeler-postgresql-user-password
+
+  # ---------------------------------------------------------------------------
+  # Console
+  # ---------------------------------------------------------------------------
+  console:
+    enabled: true
+    serviceAccount:
+      enabled: false
+      name: camunda-vault-agent
+    initContainers: *agentInit
+    sidecars: *agentSidecar
+    extraVolumes: *agentVolumes
+    extraVolumeMounts: *agentAppMounts
+
+  # ---------------------------------------------------------------------------
+  # Bundled Elasticsearch (single node) with X-Pack security enabled.
+  # The `elastic` user password is taken from camunda-credentials
+  # (bitnami expects the key `elasticsearch-password`).
+  # ---------------------------------------------------------------------------
+  elasticsearch:
+    enabled: true
+    security:
+      enabled: true
+      existingSecret: camunda-credentials
+      tls:
+        # Internal cluster traffic only: REST API stays HTTP + basic-auth so the
+        # `elastic` password (from Vault) is all that's needed by clients.
+        restEncryption: false
+        # Bitnami requires TLS material for the transport layer when X-Pack
+        # security is enabled; auto-generate it (node-to-node only).
+        autoGenerated: true
+    master:
+      masterOnly: false
+      replicaCount: 1
+    data:
+      replicaCount: 0
+    coordinating:
+      replicaCount: 0
+    ingest:
+      replicaCount: 0
+    # Avoid the privileged sysctl init container (air-gap / restricted policy).
+    # Ensure nodes have vm.max_map_count=262144 (see docs/IBM-Cloud-deploy.md).
+    sysctlImage:
+      enabled: false

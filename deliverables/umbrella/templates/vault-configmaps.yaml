@@ -1,0 +1,48 @@
+{{- $va := .Values.vaultAgent -}}
+{{/*
+ConfigMaps consumed by every Camunda module's vault init-container & sidecar,
+and by the bootstrap Job. Installed as pre-install/pre-upgrade hooks so they
+exist before the bootstrap Job runs, and they persist for the module pods.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camunda-vault-agent-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  config.json: |
+    {{- $cfg := dict "secretName" $va.secretName "entries" $va.mappings "files" (list) }}
+    {{ toJson $cfg | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camunda-vault-agent-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  VAULT_ADDR: {{ $va.vault.addr | quote }}
+  VAULT_AUTH_PATH: {{ $va.vault.authPath | quote }}
+  VAULT_ROLE: {{ $va.vault.role | quote }}
+  VAULT_NAMESPACE: {{ $va.vault.namespace | quote }}
+  VAULT_SKIP_VERIFY: {{ $va.vault.skipVerify | quote }}
+  {{- if $va.vault.caConfigMap }}
+  VAULT_CACERT: "/vault/ca/ca.crt"
+  {{- end }}
+  CONFIG_FILE: "/etc/camunda-vault-agent/config.json"
+  INTERVAL_SECONDS: {{ $va.intervalSeconds | quote }}
+  RESTART_MODE: {{ $va.restart.mode | quote }}
+  RESTART_PROCESS_MATCH: {{ $va.restart.processMatch | quote }}

@@ -1,0 +1,70 @@
+{{/*
+ServiceAccount + minimal, least-privilege RBAC for the Vault agent.
+
+These are installed as pre-install / pre-upgrade hooks (with ascending weights)
+so that they exist *before* the bootstrap Job runs, and they persist for the
+lifetime of the release because the module sidecars reference them by name.
+
+Least privilege:
+  * The agent may CREATE secrets and GET/UPDATE/PATCH only the single
+    `camunda-credentials` secret. Nothing else.
+  * Module restart uses the in-pod SIGNAL mechanism (RESTART_MODE=signal),
+    which needs NO Kubernetes RBAC at all.
+  * If you switch RESTART_MODE=rollout, uncomment the apps/* rule below and
+    scope it to your workload names.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.vaultAgent.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.vaultAgent.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  # Creating the secret the first time (create cannot be restricted by name).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  # Reading / rotating ONLY the single managed secret.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ .Values.vaultAgent.secretName }}"]
+    verbs: ["get", "update", "patch"]
+  # --- Optional: only needed if RESTART_MODE=rollout (not for signal mode) ---
+  # - apiGroups: ["apps"]
+  #   resources: ["deployments", "statefulsets"]
+  #   resourceNames: ["camunda-zeebe", "camunda-identity", "camunda-optimize", "camunda-connectors", "camunda-console", "camunda-web-modeler-restapi"]
+  #   verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.vaultAgent.serviceAccountName }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-14"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.vaultAgent.serviceAccountName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.vaultAgent.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}

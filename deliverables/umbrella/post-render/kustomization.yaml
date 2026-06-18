@@ -1,0 +1,54 @@
+# Post-render overlay: enable `shareProcessNamespace` on the Camunda modules
+# so the in-pod vault-agent (RESTART_MODE=signal) can SIGTERM the JVM to apply
+# rotated secrets — WITHOUT any Kubernetes RBAC for restarts.
+#
+# Targets assume release name "camunda". Adjust the names if you change it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - all.yaml
+
+patches:
+  - patch: |
+      - op: add
+        path: /spec/template/spec/shareProcessNamespace
+        value: true
+    target:
+      kind: StatefulSet
+      name: camunda-zeebe
+  - patch: |
+      - op: add
+        path: /spec/template/spec/shareProcessNamespace
+        value: true
+    target:
+      kind: Deployment
+      name: camunda-identity
+  - patch: |
+      - op: add
+        path: /spec/template/spec/shareProcessNamespace
+        value: true
+    target:
+      kind: Deployment
+      name: camunda-optimize
+  - patch: |
+      - op: add
+        path: /spec/template/spec/shareProcessNamespace
+        value: true
+    target:
+      kind: Deployment
+      name: camunda-connectors
+  - patch: |
+      - op: add
+        path: /spec/template/spec/shareProcessNamespace
+        value: true
+    target:
+      kind: Deployment
+      name: camunda-console
+  - patch: |
+      - op: add
+        path: /spec/template/spec/shareProcessNamespace
+        value: true
+    target:
+      kind: Deployment
+      name: camunda-web-modeler-restapi

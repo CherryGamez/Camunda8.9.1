@@ -1,0 +1,13 @@
+apiVersion: v2
+name: camunda-vault-umbrella
+description: >-
+  Umbrella chart for Camunda 8.9 Self-Managed (camunda-platform 14.0.1) wired to
+  fetch all PostgreSQL, Keycloak and Elasticsearch passwords dynamically from
+  HashiCorp Vault via a minimal, least-privilege sidecar/init agent.
+type: application
+version: 1.0.0
+appVersion: "8.9.1"
+dependencies:
+  - name: camunda-platform
+    version: 14.0.1
+    repository: https://helm.camunda.io
