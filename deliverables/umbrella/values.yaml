@@ -117,53 +117,30 @@ haproxy:
 # (This top-level key is not a subchart; Helm simply ignores it.)
 # -----------------------------------------------------------------------------
 _vaultAgentTemplates:
+  # Shared pod volumes. No gencert/self-signed volume — TLS trust comes from the
+  # cluster-provided `trusted-ca` ConfigMap (key service-ca.crt -> tls-ca-bundle.pem).
   volumes: &agentVolumes
     - name: vault-agent-config
       configMap:
         name: camunda-vault-agent-config
     - name: vault-shared
       emptyDir: {}
-    - name: vault-tls
-      emptyDir: {}
     - name: vault-tmp
       emptyDir: {}
-    - name: vault-ca
+    - name: trusted-ca
       configMap:
-        name: camunda-vault-agent-ca
+        name: trusted-ca
         optional: true
+        items:
+          - key: service-ca.crt
+            path: tls-ca-bundle.pem
   appMounts: &agentAppMounts
-    - name: vault-tls
-      mountPath: /vault/tls
+    - name: trusted-ca
+      mountPath: /etc/pki/ca-trust/extracted/pem
       readOnly: true
 
   initContainers: &agentInit
-    # 1) Generate a self-signed certificate into the shared /tls volume.
-    - name: vault-gencert
-      image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
-      imagePullPolicy: IfNotPresent
-      args: ["gencert"]
-      env:
-        - name: CERT_DIR
-          value: /tls
-        - name: CERT_CN
-          value: camunda
-        - name: CERT_SANS
-          value: "*.camunda.svc.cluster.local,*.camunda.svc,localhost,127.0.0.1"
-      volumeMounts:
-        - name: vault-tls
-          mountPath: /tls
-        - name: vault-tmp
-          mountPath: /tmp
-      securityContext: &agentSecCtx
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        runAsNonRoot: true
-        runAsUser: 1001
-        capabilities:
-          drop: ["ALL"]
-        seccompProfile:
-          type: RuntimeDefault
-    # 2) Fetch secrets from Vault and reconcile camunda-credentials before the app boots.
+    # Fetch secrets from Vault and reconcile camunda-credentials before the app boots.
     - name: vault-fetch
       image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
       imagePullPolicy: IfNotPresent
@@ -184,13 +161,21 @@ _vaultAgentTemplates:
           mountPath: /vault/secrets
         - name: vault-tmp
           mountPath: /tmp
-        - name: vault-ca
-          mountPath: /vault/ca
+        - name: trusted-ca
+          mountPath: /etc/pki/ca-trust/extracted/pem
           readOnly: true
-      securityContext: *agentSecCtx
+      securityContext: &agentSecCtx
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 1001
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
 
   sidecars: &agentSidecar
-    # Watches Vault; on change updates camunda-credentials and restarts the module.
+    # Watches Vault; on change updates camunda-credentials and restarts THIS module.
     - name: vault-agent
       image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
       imagePullPolicy: IfNotPresent
@@ -211,8 +196,8 @@ _vaultAgentTemplates:
           mountPath: /vault/secrets
         - name: vault-tmp
           mountPath: /tmp
-        - name: vault-ca
-          mountPath: /vault/ca
+        - name: trusted-ca
+          mountPath: /etc/pki/ca-trust/extracted/pem
           readOnly: true
       resources:
         requests: { cpu: "10m", memory: "32Mi" }
