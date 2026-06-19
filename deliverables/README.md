@@ -8,10 +8,9 @@ for **air-gapped OpenShift / ROKS on IBM Cloud** and shipped via **ArgoCD**
 
 ```
 deliverables/
-├── .gitlab-ci.yml                 # render chart -> ArgoCD manifests (GitOps)
 ├── umbrella/                      # Umbrella Helm chart (Camunda + Vault wiring)
 │   ├── Chart.yaml                 #   depends on camunda-platform 14.0.1 (vendored tgz)
-│   ├── values.yaml                #   << THE umbrella values: all modules + Vault
+│   ├── values.yaml                #   << THE complete umbrella values (all apps + Vault)
 │   └── templates/                 #   per-app SA/RBAC, ConfigMaps, trusted-ca,
 │                                  #   bootstrap Job, HAProxy, NetworkPolicy
 ├── vault-sidecar/                 # The agent (shell + curl), Dockerfile, image build
@@ -39,7 +38,7 @@ deliverables/
 | **Enterprise PKI / no self-signed certs** | Trust comes from the OpenShift **service-ca** via the `trusted-ca` ConfigMap (`service-ca.crt` → `tls-ca-bundle.pem`); HAProxy uses a service-serving-cert. |
 | **Minimal rights / air-gapped** | Per-app RBAC = create + get/update/patch on **its own** Secret + get/patch on **its own** workload. No Vault Injector, no webhooks, no client-go. Non-root, read-only rootfs, all caps dropped. |
 | **Single external entry point via HAProxy** | One HAProxy Service fronts everything by path prefix + proxies Zeebe gRPC; TLS via service-ca. See **docs/HAPROXY.md**. |
-| **ArgoCD-native delivery** | `.gitlab-ci.yml` renders with `helm template`, converts Helm hooks → ArgoCD PreSync/sync-waves, validates, commits to the GitOps repo. **No Helm post-renderer.** |
+| **ArgoCD-native delivery** | Point an ArgoCD Application at this Helm chart (`source.helm`); ArgoCD runs `helm template` and **natively converts the install hooks** (pre-install → PreSync), so SA/RBAC/ConfigMaps/`trusted-ca` and the bootstrap Job run before the datastores/apps. **No GitLab CI / Helm post-renderer needed.** |
 
 ## TL;DR deploy (release `camunda`, namespace `camunda`)
 
@@ -51,9 +50,9 @@ REGISTRY=icr.io/<your-namespace> vault-sidecar/build-and-push.sh 1.0.0
 export VAULT_ADDR=https://vault.example.com VAULT_TOKEN=<admin-token>
 K8S_NAMESPACE=camunda vault/setup-vault.sh
 
-# 2. Render + GitOps (CI does this): helm dependency build + helm template ->
-#    ArgoCD manifests committed to the GitOps repo. ArgoCD then syncs.
-#    Local dry-run:
+# 2. Deploy via ArgoCD (point an Application at this Helm chart):
+#    source.helm + destination.namespace=camunda + automated sync.
+#    Local dry-run of the same output:
 cd umbrella && helm dependency build . && \
   helm template camunda . -n camunda | kubectl apply --dry-run=server -f -
 ```

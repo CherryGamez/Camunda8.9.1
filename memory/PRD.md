@@ -15,9 +15,13 @@ TLS.
 - Drop self-signed `gencert` → mount the OpenShift **service-ca** `trusted-ca`
   ConfigMap (key `service-ca.crt` → `tls-ca-bundle.pem`).
 - HAProxy TLS via OpenShift **service-serving-cert** (no self-signed).
-- Deploy via **ArgoCD**: render with `helm template` in **GitLab CI** (no Helm
-  post-renderer / no `shareProcessNamespace`).
+- Deploy via **ArgoCD**: point an Application at the Helm chart directly
+  (`source.helm`); ArgoCD natively converts install hooks → PreSync. **No GitLab
+  CI / Helm post-renderer.**
 - Document **NetworkPolicy alternatives** for clusters without NetworkPolicy.
+- **Complete, self-contained `values.yaml`**: per-app image registry (air-gap),
+  resources, replicas, persistence, env hooks, OIDC, OpenShift compat; HAProxy
+  block documents the external path → Service mapping for every app.
 
 ## User choices (gathered)
 - Restart model: **per-app rollout** (a).

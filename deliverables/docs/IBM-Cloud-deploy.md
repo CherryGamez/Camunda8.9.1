@@ -50,20 +50,27 @@ grep -rl camunda.example.com umbrella/values.yaml | \
   xargs sed -i 's/camunda.example.com/<your-host>/g'
 ```
 
-## 5. Render & deploy via GitLab CI + ArgoCD
-The chart is delivered through GitOps, **not** `helm install`:
+## 5. Deploy via ArgoCD (chart consumed directly — no CI rendering)
+Point an ArgoCD **Application** at this Helm chart; ArgoCD runs `helm template`
+and honours the install hooks natively:
 
-1. Commit `deliverables/` to your GitLab repo. The pipeline (`.gitlab-ci.yml`):
-   - `helm dependency build` (offline, the camunda-platform tgz is vendored),
-   - `helm template` → `rendered/camunda.yaml`,
-   - converts Helm hooks → **ArgoCD PreSync hooks + sync-waves**,
-   - `kubeconform` validates,
-   - commits the rendered YAML into the GitOps repo path ArgoCD watches.
-2. Point an ArgoCD **Application** at that GitOps path (a *Directory* source),
-   `destination.namespace: camunda`, `syncPolicy.automated` + `CreateNamespace=true`.
-3. ArgoCD applies the manifests: PreSync wave brings up SA/RBAC/ConfigMaps/
-   `trusted-ca` then the **bootstrap Job** (seeds all secrets); the main sync then
-   brings up Elasticsearch/Keycloak/PostgreSQL and the Camunda apps.
+1. Commit `deliverables/umbrella` to your Git repo.
+2. Create an ArgoCD Application with a **Helm** source:
+   ```yaml
+   spec:
+     source:
+       repoURL: <your-git-repo>
+       path: umbrella
+       helm:
+         valueFiles: [values.yaml]
+     destination: { namespace: camunda, server: https://kubernetes.default.svc }
+     syncPolicy:
+       automated: { prune: true, selfHeal: true }
+       syncOptions: [CreateNamespace=true]
+   ```
+3. ArgoCD converts the `pre-install`/`pre-upgrade` hooks to **PreSync** (ordered
+   by hook-weight): SA/RBAC/ConfigMaps/`trusted-ca` → **bootstrap Job** (seeds all
+   secrets) → main sync brings up Elasticsearch/Keycloak/PostgreSQL + the apps.
 
 > Local dry-run of the same output:
 > ```bash

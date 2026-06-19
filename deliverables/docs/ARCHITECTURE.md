@@ -91,17 +91,31 @@ On vanilla Kubernetes set `vaultAgent.trustedCa.openshiftInject=false` and paste
 your PEM into `vaultAgent.trustedCa.caBundle`; set `haproxy.tls.openshiftServiceCA=false`
 and provide your own `kubernetes.io/tls` secret in `haproxy.tls.secretName`.
 
-## Deployment — ArgoCD via GitLab CI (no Helm post-render)
+## Deployment — ArgoCD consumes the Helm chart directly (no post-render, no CI)
 
-The previous Helm `--post-renderer` step is **gone**: per-app rollout restarts
-removed the need to inject `shareProcessNamespace`, so the chart renders to plain
-manifests with no post-processing.
+The Helm `--post-renderer` step is **gone**: per-app rollout restarts removed the
+need to inject `shareProcessNamespace`, so nothing post-processes the output.
 
-`.gitlab-ci.yml` (repo root) runs `helm template`, converts the Helm install
-hooks into **ArgoCD PreSync hooks + sync-waves** (so SA/RBAC/ConfigMaps/trusted-ca
-apply before the bootstrap Job, which applies before datastores/apps), validates
-with `kubeconform`, and commits the rendered YAML to the GitOps repo ArgoCD
-watches. This "rendered manifests" pattern is auditable and air-gap friendly.
+Point an **ArgoCD Application** straight at this chart (a `source.helm` source).
+ArgoCD runs `helm template` itself and **natively converts Helm install hooks**
+(`helm.sh/hook: pre-install,pre-upgrade` → ArgoCD `PreSync`, ordered by
+`hook-weight` → sync-wave). So SA/RBAC/ConfigMaps/`trusted-ca` apply first, then
+the **bootstrap Job** seeds all secrets, then the datastores/apps sync. No GitLab
+CI rendering pipeline and no Helm post-renderer are required.
+
+```yaml
+# argocd Application (excerpt)
+spec:
+  source:
+    repoURL: <your git repo with deliverables/umbrella>
+    path: umbrella
+    helm:
+      valueFiles: [values.yaml]
+  destination: { namespace: camunda, server: https://kubernetes.default.svc }
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
+```
 
 ## Why this is least-privilege / air-gap friendly
 
