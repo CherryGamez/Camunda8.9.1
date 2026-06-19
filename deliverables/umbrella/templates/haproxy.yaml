@@ -51,10 +51,17 @@ data:
     # ---- main HTTP entry point ----
     frontend http_in
       bind *:8080
+{{- if $h.tls.enabled }}
+      bind *:8443 ssl crt /etc/haproxy/tls/tls.pem alpn h2,http/1.1
+{{- end }}
       mode http
       option  httplog
       option  forwardfor
       option  http-server-close
+{{- if and $h.tls.enabled $h.tls.redirectHttp }}
+      # Redirect plain HTTP to HTTPS
+      http-request redirect scheme https code 301 unless { ssl_fc }
+{{- end }}
 
       # Identify websocket upgrades (Web Modeler collaboration)
       acl is_ws            hdr(Upgrade) -i websocket
@@ -128,12 +135,46 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+{{- if $h.tls.enabled }}
+      initContainers:
+        # Assemble the HAProxy PEM (cert+key). Self-signs if no Secret is given.
+        - name: tls-init
+          image: {{ $.Values.vaultAgent.image | quote }}
+          imagePullPolicy: {{ $.Values.vaultAgent.imagePullPolicy }}
+{{- if $h.tls.existingSecret }}
+          command: ["sh", "-c", "cat /tls-src/tls.crt /tls-src/tls.key > /etc/haproxy/tls/tls.pem && echo assembled PEM from {{ $h.tls.existingSecret }}"]
+{{- else }}
+          command: ["sh", "-c", "camunda-vault-agent gencert && cat $CERT_DIR/tls.crt $CERT_DIR/tls.key > /etc/haproxy/tls/tls.pem && echo generated self-signed PEM"]
+          env:
+            - { name: CERT_DIR, value: /etc/haproxy/tls }
+            - { name: CERT_CN,  value: {{ $h.host | quote }} }
+            - { name: CERT_SANS, value: {{ $h.host | quote }} }
+{{- end }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/haproxy/tls
+{{- if $h.tls.existingSecret }}
+            - name: tls-src
+              mountPath: /tls-src
+              readOnly: true
+{{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+{{- end }}
       containers:
         - name: haproxy
           image: {{ $h.image | quote }}
           args: ["-f", "/usr/local/etc/haproxy/haproxy.cfg"]
           ports:
             - { name: http, containerPort: 8080 }
+{{- if $h.tls.enabled }}
+            - { name: https, containerPort: 8443 }
+{{- end }}
             - { name: grpc, containerPort: 26500 }
             - { name: stats, containerPort: 8404 }
           readinessProbe:
@@ -157,12 +198,26 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+{{- if $h.tls.enabled }}
+            - name: tls
+              mountPath: /etc/haproxy/tls
+              readOnly: true
+{{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ $r }}-haproxy
         - name: tmp
           emptyDir: {}
+{{- if $h.tls.enabled }}
+        - name: tls
+          emptyDir: {}
+{{- if $h.tls.existingSecret }}
+        - name: tls-src
+          secret:
+            secretName: {{ $h.tls.existingSecret }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -184,6 +239,12 @@ spec:
       port: {{ $h.service.httpPort }}
       targetPort: 8080
       protocol: TCP
+{{- if $h.tls.enabled }}
+    - name: https
+      port: {{ $h.service.httpsPort }}
+      targetPort: 8443
+      protocol: TCP
+{{- end }}
     - name: grpc
       port: {{ $h.service.grpcPort }}
       targetPort: 26500

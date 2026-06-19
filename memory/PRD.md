@@ -32,20 +32,19 @@ functionality, fetch secrets for the module and restart it.
 - RBAC: create + get/update/patch on the single `camunda-credentials` secret. No more.
 
 ## Status — implemented & verified (2026-06-18)
-- HAProxy added as the single external entry point: ConfigMap+Deployment+Service
-  (LoadBalancer), path-prefix routing to all modules + Zeebe gRPC (TCP).
-  `haproxy -c` validates the generated config; runtime DNS via resolvers/init-addr.
-- Single-domain wiring populated: per-module `contextPath`s (/identity, /optimize,
-  /modeler, /console, /connectors, /auth) + OIDC publicIssuerUrl & redirectUrls on
-  `global.host`. Modules also communicate internally over cluster DNS (default).
-- `helm lint`/`template`: clean. Object counts: 7 Deployments (6 modules + HAProxy),
-  18 Services, NetworkPolicy/RBAC toggles, CA wiring. Post-render injects
-  shareProcessNamespace into the 6 modules. Host is a single placeholder
-  (camunda.example.com) swappable via one sed.
-- Agent verified against a live TLS Vault (verified HTTPS w/ CA, clean fatal on TLS
+- HAProxy single entry point with **built-in TLS termination** (:8443, Service
+  443→8443, HTTP→HTTPS 301 redirect). Cert via self-signed init (camunda-vault-agent
+  gencert) by default, or `kubernetes.io/tls` `existingSecret`. All external URLs
+  flipped to https. `haproxy -c` validates the TLS config; gRPC :26500 plaintext.
+- Path-prefix routing to all modules + per-module contextPaths + OIDC
+  publicIssuerUrl/redirectUrls on global.host. Internal module-to-module comms via
+  cluster DNS (default).
+- `helm lint`/`template` clean for TLS on/off/existingSecret. Post-render injects
+  shareProcessNamespace into the 6 modules.
+- Vault agent verified against live TLS Vault (HTTPS w/ CA, clean fatal on TLS
   failure, skip-verify, KV v2 read, create/patch, idempotency, rotation); gencert ok.
 - Security toggles: vaultAgent.rbac.create (zero-RBAC), networkPolicy (bootstrap
-  egress = DNS+Vault+API only), vault.caCert (HTTPS CA in every agent container).
+  egress = DNS+Vault+API), vault.caCert (HTTPS CA in every agent container).
 
 ## NOT verified here (needs a real cluster)
 - Full Camunda end-to-end boot on IBM Cloud (no cluster/Vault/registry in build env).

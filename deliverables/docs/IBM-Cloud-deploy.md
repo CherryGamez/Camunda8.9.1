@@ -91,8 +91,9 @@ HAProxy is the only external ingress. Get its address and point DNS at it:
 ```bash
 kubectl -n camunda get svc camunda-haproxy -o wide   # EXTERNAL-IP (IKS LoadBalancer)
 # DNS / /etc/hosts: <your-host> -> EXTERNAL-IP
-#   http://<your-host>/operate   /tasklist   /identity   /optimize   /modeler   /console
-# Zeebe gRPC clients -> <your-host>:26500
+#   https://<your-host>/operate  /tasklist  /identity  /optimize  /modeler  /console
+#   (HTTP :80 redirects to HTTPS :443; default cert is self-signed -> browser warning)
+# Zeebe gRPC clients -> <your-host>:26500 (plaintext)
 ```
 Replace the `camunda.example.com` placeholder everywhere first:
 ```bash

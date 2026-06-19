@@ -67,12 +67,30 @@ oc -n camunda create route edge camunda --service=camunda-haproxy --port=http
 ```
 (Or `passthrough`/`reencrypt` if you terminate TLS at HAProxy.)
 
-## Production TLS (recommended)
-Terminate TLS at HAProxy: add a `bind *:8443 ssl crt /etc/haproxy/tls/tls.pem`
-frontend (mount a cert Secret, e.g. from the `vault-gencert` init pattern or
-cert-manager), map Service `443 → 8443`, and switch all `http://<host>` URLs in
-`values.yaml` to `https://`. Keycloak Identity requires HTTPS when a contextPath
-is used in real deployments.
+## TLS (built-in, default ON)
+HAProxy terminates TLS on **:8443** (Service **443 → 8443**) and 301-redirects
+HTTP → HTTPS. All external URLs in `values.yaml` are `https://`.
+
+```yaml
+haproxy:
+  tls:
+    enabled: true
+    redirectHttp: true
+    existingSecret: ""     # kubernetes.io/tls Secret (tls.crt, tls.key)
+    selfSigned: true       # used when existingSecret is empty
+```
+
+- **Self-signed (default):** an init container runs `camunda-vault-agent gencert`
+  and assembles `/etc/haproxy/tls/tls.pem` (cert+key). Browsers warn on the cert —
+  fine for non-prod / placeholder host.
+- **Production cert:** create a `kubernetes.io/tls` Secret (your CA / cert-manager)
+  and set `haproxy.tls.existingSecret: <name>`; the init container assembles the
+  PEM from it. No app changes needed.
+- **Disable TLS:** `--set haproxy.tls.enabled=false` and switch the `https://` URLs
+  in `values.yaml` back to `http://`.
+
+The HTTPS bind advertises `alpn h2,http/1.1`. Zeebe **gRPC stays plaintext** on
+`:26500`; to secure it add a second `ssl` bind on the `zeebe_grpc` listener.
 
 ## Air-gap
 Mirror `haproxytech/haproxy-alpine:3.0` into your registry and set `haproxy.image`.

@@ -96,8 +96,17 @@ haproxy:
   service:
     type: LoadBalancer        # LoadBalancer (IKS) | NodePort | ClusterIP (+ Route on OpenShift)
     httpPort: 80              # external HTTP port  -> container :8080
+    httpsPort: 443           # external HTTPS port -> container :8443 (when tls.enabled)
     grpcPort: 26500          # external Zeebe gRPC -> container :26500
     annotations: {}
+  # TLS termination at HAProxy. Default on with a self-signed cert; for production
+  # provide a real cert via existingSecret (a kubernetes.io/tls Secret) or cert-manager.
+  tls:
+    enabled: true
+    httpsPort: 443           # (kept for reference; service.httpsPort is authoritative)
+    redirectHttp: true       # 301 redirect http -> https
+    existingSecret: ""       # kubernetes.io/tls Secret (keys tls.crt, tls.key); empty => self-signed
+    selfSigned: true         # generate a self-signed cert when existingSecret is empty
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits: { cpu: "500m", memory: "256Mi" }
@@ -227,13 +236,13 @@ camunda-platform:
         enabled: true
         # Browser-facing Keycloak issuer (through HAProxy /auth). Token validation
         # still uses the in-cluster issuerBackendUrl (auto-derived).
-        publicIssuerUrl: "http://camunda.example.com/auth/realms/camunda-platform"
+        publicIssuerUrl: "https://camunda.example.com/auth/realms/camunda-platform"
         optimize:
-          redirectUrl: "http://camunda.example.com/optimize"
+          redirectUrl: "https://camunda.example.com/optimize"
         webModeler:
-          redirectUrl: "http://camunda.example.com/modeler"
+          redirectUrl: "https://camunda.example.com/modeler"
         console:
-          redirectUrl: "http://camunda.example.com/console"
+          redirectUrl: "https://camunda.example.com/console"
 
   # ---------------------------------------------------------------------------
   # Management Identity
@@ -242,7 +251,7 @@ camunda-platform:
     enabled: true
     # Single-domain: served behind HAProxy at /identity
     contextPath: "/identity"
-    fullURL: "http://camunda.example.com/identity"
+    fullURL: "https://camunda.example.com/identity"
     serviceAccount:
       enabled: false
       name: camunda-vault-agent
