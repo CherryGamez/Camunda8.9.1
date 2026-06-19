@@ -192,11 +192,18 @@ reconcile_secret() {
 fetch_once() {
   CHANGED=0
   [ -f "$CONFIG_FILE" ] || { log "ERROR: mapping config not found: $CONFIG_FILE"; return 1; }
+  secrets_n="$(jq '.secrets | length' "$CONFIG_FILE")"
+  [ "$secrets_n" -gt 0 ] || { log "ERROR: config has no .secrets[]"; return 1; }
+  # Placeholder / idle sidecar: if no mappings are configured yet, do nothing
+  # (and do NOT contact Vault), so an unconfigured app pod still starts cleanly.
+  total_entries="$(jq '[.secrets[].entries // [] | length] | add // 0' "$CONFIG_FILE")"
+  if [ "$total_entries" = "0" ]; then
+    log "no secret mappings configured (placeholder); idle — skipping Vault login"
+    return 0
+  fi
   token="$(vault_login)" || return 1
   ns="$(resolve_namespace)" || { log "ERROR: could not determine namespace (set POD_NAMESPACE)"; return 1; }
 
-  secrets_n="$(jq '.secrets | length' "$CONFIG_FILE")"
-  [ "$secrets_n" -gt 0 ] || { log "ERROR: config has no .secrets[]"; return 1; }
   i=0
   while [ "$i" -lt "$secrets_n" ]; do
     sname="$(jq -r ".secrets[$i].secretName" "$CONFIG_FILE")"

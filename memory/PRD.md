@@ -42,7 +42,9 @@ TLS.
     Job keeps its own dedicated SA `camunda-vault-bootstrap`.
   - Datastore-only secrets (bootstrap-seeded, no sidecar): elasticsearch,
     keycloak (admin), keycloak-db, web-modeler-db.
-  - Identity / Connectors / Console: **no sidecar** (OIDC, no Vault DB secret).
+  - Idle placeholder sidecars: **identity, connectors, console** (Deployments)
+    each run a sidecar under their own SA with `mappings: []` (no Vault contact,
+    won't block startup) — ready to activate by adding entries + a Vault read path.
 - `agent.sh` (shell+curl): `fetch` | `watch`. Multi-secret config schema
   (`{vaultRole, secrets:[{secretName, entries}]}`); `rollout`/`none` restart.
 - Bootstrap Job (pre-install hook) seeds ALL secrets before datastores boot.

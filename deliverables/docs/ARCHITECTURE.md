@@ -55,10 +55,14 @@ consumed natively via `existingSecret`:
 | `camunda-keycloak-db-secret` | Keycloak PostgreSQL |
 | `camunda-web-modeler-db-secret` | Web Modeler PostgreSQL (same secret the restapi sidecar maintains) |
 
-**Identity / Connectors / Console get no sidecar** — they authenticate via
-Keycloak (OIDC) and hold no Vault-sourced DB password, so attaching an agent
-would add RBAC for no benefit. (To change this, add a `sidecar:` block under the
-relevant entry in `vaultAgent.targets`.)
+**Identity / Connectors / Console** authenticate via Keycloak (OIDC) and have no
+Vault-sourced runtime secret today, so they carry an **idle placeholder sidecar**:
+`mappings: []` means the agent does **not** contact Vault and never blocks pod
+startup. Each still runs under its own SA (`camunda-identity` / `camunda-connectors`
+/ `camunda-console`) with a scoped Role + Vault role ready to use. To activate one,
+add `entries` to its `vaultAgent.targets` mapping and the matching read path in
+`vault/setup-vault.sh` — the sidecar then refreshes that secret and rollout-restarts
+the module.
 
 ## Secret flow
 

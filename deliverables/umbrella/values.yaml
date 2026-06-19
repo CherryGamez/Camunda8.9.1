@@ -100,6 +100,35 @@ vaultAgent:
         vaultRole: camunda-optimize
         workload: { kind: Deployment, name: camunda-optimize }
 
+    # ---- PLACEHOLDER sidecars: identity / connectors / console -------------------
+    # These modules authenticate via Keycloak (OIDC) and have no Vault-sourced
+    # runtime secret today, so `mappings: []` keeps the sidecar IDLE (it does not
+    # contact Vault and never blocks pod startup). To activate one, add entries
+    # (and the matching Vault read path/policy in vault/setup-vault.sh):
+    #   mappings:
+    #     - { vaultPath: secret/data/camunda/<path>, field: <field>, secretKey: <k8s-secret-key> }
+    - name: identity
+      secretName: camunda-identity-secret
+      mappings: []
+      sidecar:
+        serviceAccountName: camunda-identity
+        vaultRole: camunda-identity
+        workload: { kind: Deployment, name: camunda-identity }
+    - name: connectors
+      secretName: camunda-connectors-secret
+      mappings: []
+      sidecar:
+        serviceAccountName: camunda-connectors
+        vaultRole: camunda-connectors
+        workload: { kind: Deployment, name: camunda-connectors }
+    - name: console
+      secretName: camunda-console-secret
+      mappings: []
+      sidecar:
+        serviceAccountName: camunda-console
+        vaultRole: camunda-console
+        workload: { kind: Deployment, name: camunda-console }
+
 # -----------------------------------------------------------------------------
 # HAProxy — THE single external entry point. External traffic enters here and is
 # routed by URL path prefix to each module's internal ClusterIP Service.
@@ -194,7 +223,7 @@ camunda-platform:
           redirectUrl: "https://camunda.example.com/console"
 
   # ---------------------------------------------------------------------------
-  # Management Identity (OIDC via Keycloak; no Vault runtime secret -> no sidecar)
+  # Management Identity (OIDC via Keycloak). Idle placeholder Vault sidecar.
   # Reached at https://camunda.example.com/identity
   # ---------------------------------------------------------------------------
   identity:
@@ -211,7 +240,50 @@ camunda-platform:
     env: []
     # - name: LOGGING_LEVEL_IO_CAMUNDA_IDENTITY
     #   value: INFO
+    serviceAccount:
+      enabled: true
+      name: camunda-identity
+    # Idle Vault sidecar (placeholder mappings) — shares the camunda-identity SA.
+    initContainers:
+      - name: vault-fetch
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["fetch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        securityContext: &agentSecCtx
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+          capabilities: { drop: ["ALL"] }
+          seccompProfile: { type: RuntimeDefault }
+    sidecars:
+      - name: vault-agent
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["watch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+          - { name: RESTART_TARGET_KIND, value: Deployment }
+          - { name: RESTART_TARGET_NAME, value: camunda-identity }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        resources:
+          requests: { cpu: "10m", memory: "32Mi" }
+          limits: { cpu: "100m", memory: "64Mi" }
+        securityContext: *agentSecCtx
     extraVolumes:
+      - { name: vault-agent-config, configMap: { name: camunda-vault-identity-config } }
+      - { name: vault-tmp, emptyDir: {} }
       - name: trusted-ca
         configMap:
           name: trusted-ca
@@ -349,7 +421,7 @@ camunda-platform:
       - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
 
   # ---------------------------------------------------------------------------
-  # Connectors (talks to Zeebe; no Vault runtime secret -> no sidecar)
+  # Connectors (talks to Zeebe). Idle placeholder Vault sidecar.
   # Reached at https://camunda.example.com/connectors
   # ---------------------------------------------------------------------------
   connectors:
@@ -362,7 +434,44 @@ camunda-platform:
       requests: { cpu: "500m", memory: "512Mi" }
       limits: { cpu: "1000m", memory: "1Gi" }
     env: []
+    serviceAccount:
+      enabled: true
+      name: camunda-connectors
+    # Idle Vault sidecar (placeholder mappings) — shares the camunda-connectors SA.
+    initContainers:
+      - name: vault-fetch
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["fetch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        securityContext: *agentSecCtx
+    sidecars:
+      - name: vault-agent
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["watch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+          - { name: RESTART_TARGET_KIND, value: Deployment }
+          - { name: RESTART_TARGET_NAME, value: camunda-connectors }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        resources:
+          requests: { cpu: "10m", memory: "32Mi" }
+          limits: { cpu: "100m", memory: "64Mi" }
+        securityContext: *agentSecCtx
     extraVolumes:
+      - { name: vault-agent-config, configMap: { name: camunda-vault-connectors-config } }
+      - { name: vault-tmp, emptyDir: {} }
       - name: trusted-ca
         configMap:
           name: trusted-ca
@@ -529,7 +638,7 @@ camunda-platform:
         userPasswordKey: user-password
 
   # ---------------------------------------------------------------------------
-  # Console (no Vault runtime secret -> no sidecar). Reached at /console
+  # Console. Idle placeholder Vault sidecar. Reached at /console
   # ---------------------------------------------------------------------------
   console:
     enabled: true
@@ -539,7 +648,44 @@ camunda-platform:
       requests: { cpu: "200m", memory: "256Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
     env: []
+    serviceAccount:
+      enabled: true
+      name: camunda-console
+    # Idle Vault sidecar (placeholder mappings) — shares the camunda-console SA.
+    initContainers:
+      - name: vault-fetch
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["fetch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        securityContext: *agentSecCtx
+    sidecars:
+      - name: vault-agent
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["watch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+          - { name: RESTART_TARGET_KIND, value: Deployment }
+          - { name: RESTART_TARGET_NAME, value: camunda-console }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        resources:
+          requests: { cpu: "10m", memory: "32Mi" }
+          limits: { cpu: "100m", memory: "64Mi" }
+        securityContext: *agentSecCtx
     extraVolumes:
+      - { name: vault-agent-config, configMap: { name: camunda-vault-console-config } }
+      - { name: vault-tmp, emptyDir: {} }
       - name: trusted-ca
         configMap:
           name: trusted-ca

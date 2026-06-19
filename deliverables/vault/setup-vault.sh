@@ -41,6 +41,7 @@ CONFIG_ARGS=( "kubernetes_host=${KUBERNETES_HOST}" )
 vault write "auth/${VAULT_AUTH_PATH}/config" "${CONFIG_ARGS[@]}"
 
 # write_policy <name> <path-glob...> : a read-only policy over the given KV v2 paths
+# (call with no paths to create an empty placeholder policy = deny all reads).
 write_policy() {
   local name="$1"; shift
   local body=""
@@ -66,12 +67,20 @@ write_policy camunda-bootstrap     "camunda/*"
 write_policy camunda-orchestration "camunda/elasticsearch"
 write_policy camunda-optimize      "camunda/elasticsearch"
 write_policy camunda-web-modeler   "camunda/postgres/webmodeler"
+# Placeholder (empty) policies for the idle sidecars — add read paths when you
+# wire a real secret for these modules (e.g. write_policy camunda-identity "camunda/identity").
+write_policy camunda-identity
+write_policy camunda-connectors
+write_policy camunda-console
 
 echo ">> [4/5] Create per-app roles bound to each app's own ServiceAccount"
 write_role camunda-bootstrap     camunda-vault-bootstrap camunda-bootstrap
 write_role camunda-orchestration camunda-orchestration   camunda-orchestration
 write_role camunda-optimize      camunda-optimize        camunda-optimize
 write_role camunda-web-modeler   camunda-web-modeler     camunda-web-modeler
+write_role camunda-identity      camunda-identity        camunda-identity
+write_role camunda-connectors    camunda-connectors      camunda-connectors
+write_role camunda-console       camunda-console         camunda-console
 
 echo ">> [5/5] Seed secrets (only writes a key if it does not already exist)"
 seed() {
