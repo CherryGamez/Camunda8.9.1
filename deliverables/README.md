@@ -11,7 +11,7 @@ deliverables/
 ├── umbrella/                      # Umbrella Helm chart (Camunda + Vault wiring)
 │   ├── Chart.yaml                 #   depends on camunda-platform 14.0.1
 │   ├── values.yaml                #   << THE umbrella values: all modules + Vault
-│   ├── templates/                 #   SA, minimal RBAC, ConfigMaps, bootstrap Job
+│   ├── templates/                 #   SA, minimal RBAC, ConfigMaps, bootstrap Job, HAProxy
 │   └── post-render/               #   kustomize overlay for signal-mode restart
 ├── vault-sidecar/                 # The agent (shell + curl), Dockerfile, image build
 │   ├── agent.sh                   #   gencert | fetch | watch
@@ -36,6 +36,7 @@ deliverables/
 | **Sidecar can restart the attached module** | `RESTART_MODE=signal`: in shared PID namespace the agent SIGTERMs the JVM (no RBAC). `rollout` mode available as a scoped-RBAC alternative. |
 | **Init container for self-signed certificate** | `vault-gencert` init container generates `tls.crt/tls.key/ca.crt` into a shared volume. |
 | **Minimal rights / air-gapped / enterprise policy** | Agent RBAC = create + get/update/patch on **one** Secret. Signal-restart needs **zero** workload RBAC. No mutating webhooks, no Vault Injector, no client-go. Non-root, read-only rootfs, all caps dropped. Image = alpine + curl/jq/openssl only. |
+| **Single external entry point via HAProxy** | One HAProxy Service fronts everything; routes by path prefix to each module + proxies Zeebe gRPC. Modules talk to each other over in-cluster DNS. See **docs/HAPROXY.md**. |
 
 ## TL;DR deploy (release name `camunda`, namespace `camunda`)
 

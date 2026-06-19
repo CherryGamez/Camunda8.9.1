@@ -86,15 +86,21 @@ kubectl -n camunda get pods                                   # all Running/Read
 kubectl -n camunda logs <orchestration-pod> -c vault-agent    # watch loop
 ```
 
-## 7. Access (port-forward; no ingress required)
+## 7. Access (through HAProxy — the single entry point)
+HAProxy is the only external ingress. Get its address and point DNS at it:
 ```bash
-kubectl -n camunda port-forward svc/camunda-keycloak 18080:80 &     # Keycloak
-kubectl -n camunda port-forward svc/camunda-orchestration 8080:80 & # Operate/Tasklist
-kubectl -n camunda port-forward svc/camunda-console 8087:80 &       # Console
+kubectl -n camunda get svc camunda-haproxy -o wide   # EXTERNAL-IP (IKS LoadBalancer)
+# DNS / /etc/hosts: <your-host> -> EXTERNAL-IP
+#   http://<your-host>/operate   /tasklist   /identity   /optimize   /modeler   /console
+# Zeebe gRPC clients -> <your-host>:26500
 ```
-Default first user: `demo` (password seeded by Identity/Keycloak). For external
-access, enable `camunda-platform.global.ingress.enabled` and set `global.host`
-plus the OIDC redirect/issuer URLs (see the chart's Identity modes in values.yaml).
+Replace the `camunda.example.com` placeholder everywhere first:
+```bash
+grep -rl camunda.example.com umbrella/values.yaml | xargs sed -i 's/camunda.example.com/<your-host>/g'
+```
+On OpenShift use `haproxy.service.type: ClusterIP` + an `oc create route`. See
+**docs/HAPROXY.md** for the routing table and production TLS. (No chart Ingress is
+used; `global.ingress.enabled` stays false.)
 
 ## 8. Rotating a password
 ```bash

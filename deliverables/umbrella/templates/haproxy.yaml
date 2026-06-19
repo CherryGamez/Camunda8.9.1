@@ -1,0 +1,191 @@
+{{- if .Values.haproxy.enabled }}
+{{- $h := .Values.haproxy }}
+{{- $r := .Release.Name }}
+{{/*
+HAProxy: the single external entry point for the Camunda platform.
+Routes by URL path prefix to the internal module services; gRPC (Zeebe) is
+proxied in TCP mode. Binds on unprivileged ports (8080/26500) so it can run
+non-root; the Service maps the external ports onto them.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $r }}-haproxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: haproxy
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0 info
+      maxconn 8192
+
+    defaults
+      log     global
+      mode    http
+      timeout connect 10s
+      timeout client  300s
+      timeout server  300s
+      timeout tunnel  3600s        # long-lived websockets (web-modeler)
+
+    # Runtime DNS for backend Services (reads the pod's /etc/resolv.conf), so
+    # HAProxy tracks Service ClusterIP changes and starts even if a backend is
+    # not yet resolvable during rollout.
+    resolvers kube-dns
+      parse-resolv-conf
+      resolve_retries 3
+      timeout resolve 1s
+      timeout retry   1s
+      hold valid 10s
+
+    # ---- health & stats (internal) ----
+    frontend stats
+      bind *:8404
+      mode http
+      http-request return status 200 content-type text/plain string "ok" if { path /healthz }
+      stats enable
+      stats uri /stats
+      stats refresh 10s
+
+    # ---- main HTTP entry point ----
+    frontend http_in
+      bind *:8080
+      mode http
+      option  httplog
+      option  forwardfor
+      option  http-server-close
+
+      # Identify websocket upgrades (Web Modeler collaboration)
+      acl is_ws            hdr(Upgrade) -i websocket
+
+      acl p_auth           path_beg /auth
+      acl p_identity       path_beg /identity
+      acl p_optimize       path_beg /optimize
+      acl p_modeler_ws     path_beg /modeler-ws
+      acl p_modeler        path_beg /modeler
+      acl p_console        path_beg /console
+      acl p_connectors     path_beg /connectors
+
+      use_backend be_keycloak     if p_auth
+      use_backend be_identity     if p_identity
+      use_backend be_optimize     if p_optimize
+      use_backend be_modeler_ws   if p_modeler_ws
+      use_backend be_modeler_ws   if p_modeler is_ws
+      use_backend be_modeler      if p_modeler
+      use_backend be_console      if p_console
+      use_backend be_connectors   if p_connectors
+      # Everything else (Operate, Tasklist, REST v2 API, login) -> orchestration
+      default_backend be_orchestration
+
+    backend be_keycloak
+      server s1 {{ $r }}-keycloak:80 check resolvers kube-dns init-addr none
+    backend be_identity
+      server s1 {{ $r }}-identity:80 check resolvers kube-dns init-addr none
+    backend be_optimize
+      server s1 {{ $r }}-optimize:80 check resolvers kube-dns init-addr none
+    backend be_modeler
+      server s1 {{ $r }}-web-modeler-restapi:80 check resolvers kube-dns init-addr none
+    backend be_modeler_ws
+      server s1 {{ $r }}-web-modeler-websockets:80 check resolvers kube-dns init-addr none
+    backend be_console
+      server s1 {{ $r }}-console:80 check resolvers kube-dns init-addr none
+    backend be_connectors
+      server s1 {{ $r }}-connectors:8080 check resolvers kube-dns init-addr none
+    backend be_orchestration
+      server s1 {{ $r }}-zeebe-gateway:8080 check resolvers kube-dns init-addr none
+
+    # ---- Zeebe gRPC entry point (HTTP/2 over TCP) ----
+    listen zeebe_grpc
+      bind *:26500
+      mode tcp
+      option tcplog
+      balance roundrobin
+      server s1 {{ $r }}-zeebe-gateway:26500 check resolvers kube-dns init-addr none
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $r }}-haproxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: haproxy
+spec:
+  replicas: {{ $h.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: haproxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: camunda-platform
+        app.kubernetes.io/component: haproxy
+      annotations:
+        checksum/config: {{ .Files.Get "templates/haproxy.yaml" | sha256sum | trunc 16 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: haproxy
+          image: {{ $h.image | quote }}
+          args: ["-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: grpc, containerPort: 26500 }
+            - { name: stats, containerPort: 8404 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8404 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8404 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources: {{- toYaml $h.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/etc/haproxy
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $r }}-haproxy
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $r }}-haproxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: haproxy
+  {{- with $h.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $h.service.type }}
+  selector:
+    app.kubernetes.io/component: haproxy
+  ports:
+    - name: http
+      port: {{ $h.service.httpPort }}
+      targetPort: 8080
+      protocol: TCP
+    - name: grpc
+      port: {{ $h.service.grpcPort }}
+      targetPort: 26500
+      protocol: TCP
+{{- end }}

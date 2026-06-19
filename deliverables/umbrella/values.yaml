@@ -84,6 +84,25 @@ vaultAgent:
       secretKey: web-modeler-postgresql-user-password
 
 # -----------------------------------------------------------------------------
+# HAProxy — single external entry point. All external traffic enters here and is
+# routed to the internal Camunda module ClusterIP services by path prefix.
+# -----------------------------------------------------------------------------
+haproxy:
+  enabled: true
+  # Keep host identical to camunda-platform.global.host above.
+  host: "camunda.example.com"
+  image: haproxytech/haproxy-alpine:3.0
+  replicas: 2
+  service:
+    type: LoadBalancer        # LoadBalancer (IKS) | NodePort | ClusterIP (+ Route on OpenShift)
+    httpPort: 80              # external HTTP port  -> container :8080
+    grpcPort: 26500          # external Zeebe gRPC -> container :26500
+    annotations: {}
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "256Mi" }
+
+# -----------------------------------------------------------------------------
 # YAML anchors: the agent init-containers / sidecar / volumes are identical for
 # every Camunda application module, so we define them once and reuse below.
 # (This top-level key is not a subchart; Helm simply ignores it.)
@@ -197,18 +216,33 @@ _vaultAgentTemplates:
 camunda-platform:
 
   global:
+    # External entry point: everything is reached through HAProxy on this host.
+    # Keep this value identical to `haproxy.host` below.
+    host: "camunda.example.com"
     security:
       authentication:
         method: oidc
     identity:
       auth:
         enabled: true
+        # Browser-facing Keycloak issuer (through HAProxy /auth). Token validation
+        # still uses the in-cluster issuerBackendUrl (auto-derived).
+        publicIssuerUrl: "http://camunda.example.com/auth/realms/camunda-platform"
+        optimize:
+          redirectUrl: "http://camunda.example.com/optimize"
+        webModeler:
+          redirectUrl: "http://camunda.example.com/modeler"
+        console:
+          redirectUrl: "http://camunda.example.com/console"
 
   # ---------------------------------------------------------------------------
   # Management Identity
   # ---------------------------------------------------------------------------
   identity:
     enabled: true
+    # Single-domain: served behind HAProxy at /identity
+    contextPath: "/identity"
+    fullURL: "http://camunda.example.com/identity"
     serviceAccount:
       enabled: false
       name: camunda-vault-agent
@@ -272,6 +306,7 @@ camunda-platform:
   # ---------------------------------------------------------------------------
   connectors:
     enabled: true
+    contextPath: "/connectors"
     serviceAccount:
       enabled: false
       name: camunda-vault-agent
@@ -287,6 +322,7 @@ camunda-platform:
   # ---------------------------------------------------------------------------
   optimize:
     enabled: true
+    contextPath: "/optimize"
     serviceAccount:
       enabled: false
       name: camunda-vault-agent
@@ -312,6 +348,7 @@ camunda-platform:
   # ---------------------------------------------------------------------------
   webModeler:
     enabled: true
+    contextPath: "/modeler"
     restapi:
       mail:
         fromAddress: noreply@camunda.example.com
@@ -333,6 +370,7 @@ camunda-platform:
   # ---------------------------------------------------------------------------
   console:
     enabled: true
+    contextPath: "/console"
     serviceAccount:
       enabled: false
       name: camunda-vault-agent
