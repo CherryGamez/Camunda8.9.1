@@ -1,75 +1,73 @@
 # camunda-vault-agent (shell + curl)
 
-A ~250-line POSIX shell helper that fetches Camunda secrets from HashiCorp Vault
-and reconciles them into a Kubernetes Secret, with optional module restart.
-Built for air-gapped, least-privilege clusters: no Vault SDK, no client-go, no
-mutating webhooks — only `sh`, `curl`, `jq`, `openssl`, `base64`.
+A small POSIX shell helper that fetches Camunda secrets from HashiCorp Vault and
+reconciles them into **per-app Kubernetes Secrets**, then rollout-restarts the
+attached workload on change. Built for air-gapped, least-privilege clusters: no
+Vault SDK, no client-go, no mutating webhooks — only `sh`, `curl`, `jq`, `base64`.
 
 ## Commands
 
 | Command | Container role | What it does |
 |---|---|---|
-| `gencert` | init | Generates a self-signed `tls.crt`/`tls.key`/`ca.crt` into `CERT_DIR`. |
-| `fetch` | init / Job | Logs in to Vault (k8s auth), reads the mapped fields, creates/patches the `camunda-credentials` Secret, optionally writes shared files. Idempotent. |
-| `watch` | sidecar | Loops `fetch` every `INTERVAL_SECONDS`; on change, restarts the attached module. |
+| `fetch` | init / Job | Logs in to Vault (k8s auth), reads the mapped fields, creates/patches the configured Secret(s). Idempotent. |
+| `watch` | sidecar | Loops `fetch` every `INTERVAL_SECONDS`; on change, `rollout restart`s the attached workload. |
+
+(There is **no `gencert`** — TLS trust comes from the cluster `trusted-ca` bundle.)
 
 ## Authentication
 Vault **Kubernetes auth**. The pod ServiceAccount JWT
 (`/var/run/secrets/kubernetes.io/serviceaccount/token`) is POSTed to
-`auth/<VAULT_AUTH_PATH>/login` with the configured `VAULT_ROLE`; the returned
-short-lived token is used for reads. Set `VAULT_TOKEN` to bypass login (local
-testing / static-token mode).
+`auth/<VAULT_AUTH_PATH>/login` with `VAULT_ROLE`; the returned short-lived token
+is used for reads. `VAULT_ROLE` may be supplied via env **or** the config file
+(`.vaultRole`), so the shared env ConfigMap stays role-agnostic and each pod's
+per-app config carries its own role. Set `VAULT_TOKEN` to bypass login (testing).
 
 ## Environment variables
 
 | Var | Default | Purpose |
 |---|---|---|
 | `VAULT_ADDR` | — | Vault base URL (required) |
-| `VAULT_ROLE` | — | Vault k8s auth role (required unless `VAULT_TOKEN` set) |
+| `VAULT_ROLE` | (from `.vaultRole` in config) | Vault k8s auth role |
 | `VAULT_AUTH_PATH` | `kubernetes` | k8s auth mount path |
 | `VAULT_NAMESPACE` | "" | Vault Enterprise namespace |
-| `VAULT_CACERT` | "" | CA file for Vault TLS |
+| `VAULT_CACERT` | "" | CA file for Vault TLS (the mounted `trusted-ca` bundle) |
 | `VAULT_SKIP_VERIFY` | `false` | skip Vault TLS verify (testing only) |
-| `VAULT_SA_TOKEN_PATH` | in-cluster SA token | JWT used for login (use a projected token for audience binding) |
+| `VAULT_SA_TOKEN_PATH` | in-cluster SA token | JWT used for login |
 | `VAULT_TOKEN` | "" | if set, skip login |
 | `CONFIG_FILE` | `/etc/camunda-vault-agent/config.json` | mapping file |
-| `POD_NAMESPACE` | (downward API / SA file) | target namespace for the Secret |
+| `POD_NAMESPACE` | (downward API / SA file) | target namespace for the Secret(s) |
 | `INTERVAL_SECONDS` | `300` | watch interval |
-| `RESTART_MODE` | `rollout` | `signal` \| `rollout` \| `none` |
-| `RESTART_TARGET_KIND` / `RESTART_TARGET_NAME` | `Deployment` / — | workload for rollout mode |
-| `RESTART_PROCESS_MATCH` | — | substring of the app cmdline for signal mode (e.g. `java`) |
-| `CERT_DIR` / `CERT_CN` / `CERT_SANS` / `CERT_DAYS` | `/tls` / `localhost` / "" / `825` | gencert options |
+| `RESTART_MODE` | `rollout` | `rollout` \| `none` |
+| `RESTART_TARGET_KIND` / `RESTART_TARGET_NAME` | `Deployment` / — | workload to restart on change |
 
 ## Mapping config (JSON, from a ConfigMap)
 ```json
 {
-  "secretName": "camunda-credentials",
-  "entries": [
-    { "vaultPath": "secret/data/camunda/elasticsearch", "field": "password", "secretKey": "elasticsearch-password" }
-  ],
-  "files": [
-    { "vaultPath": "secret/data/camunda/elasticsearch", "field": "password", "path": "/vault/secrets/es-password" }
+  "vaultRole": "camunda-optimize",
+  "secrets": [
+    {
+      "secretName": "camunda-optimize-secret",
+      "entries": [
+        { "vaultPath": "secret/data/camunda/elasticsearch", "field": "password", "secretKey": "elasticsearch-password" }
+      ]
+    }
   ]
 }
 ```
-- `entries` → keys written into the Kubernetes Secret (base64).
-- `files`   → values written to a shared volume (bitnami `*_FILE` convention / app config).
+- A **watch sidecar** has exactly one entry in `secrets` (its own app secret).
+- The **bootstrap Job** lists every secret so all are seeded before datastores boot.
 - `vaultPath` uses the KV v2 read path (note the `/data/` segment).
 
 ## Restart modes
-- **signal** (default in the umbrella): requires `shareProcessNamespace: true` on the
-  pod (injected by the post-render overlay). Sends `SIGTERM` to the matched process;
-  the kubelet restarts the container. **No Kubernetes RBAC needed.** The agent must
-  run as the **same UID** as the app (1001 for Camunda images) to be allowed to signal it.
-- **rollout**: patches the workload's pod-template annotation (like `kubectl rollout
-  restart`). Needs `get`/`patch` on that specific Deployment/StatefulSet.
-- **none**: update the Secret only; restart manually / rely on the next deploy.
+- **rollout** (default): patches the workload's pod-template annotation (like
+  `kubectl rollout restart`). Needs `get`/`patch` on that specific
+  Deployment/StatefulSet only.
+- **none**: update the Secret only; restart manually / on next deploy.
 
 ## Local smoke test
 ```bash
 vault server -dev -dev-root-token-id=root &
-export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root VAULT_ROLE=x
+export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root
 vault kv put secret/camunda/elasticsearch password=secret123 username=elastic
-CONFIG_FILE=./config.example.json ./agent.sh fetch     # file/secret reconcile
-CERT_DIR=/tmp/tls ./agent.sh gencert                    # self-signed cert
+CONFIG_FILE=./config.example.json POD_NAMESPACE=camunda ./agent.sh fetch
 ```

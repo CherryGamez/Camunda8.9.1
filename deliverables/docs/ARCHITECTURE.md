@@ -1,107 +1,159 @@
 # Architecture
 
+Camunda 8.9 Self-Managed on **OpenShift / ROKS (IBM Cloud)**, where every
+PostgreSQL / Keycloak / Elasticsearch password is fetched from **HashiCorp Vault**
+by a tiny shell+curl agent. Designed for **air-gapped, least-privilege** clusters
+and deployed via **ArgoCD** (manifests rendered in GitLab CI).
+
 ## Components deployed (all enabled, talking to each other)
 
 ```
                        ┌─────────────────────────────────────────┐
-                       │              Keycloak (OIDC)             │◄── identity-keycloak-admin-password
-                       │      + embedded PostgreSQL (StatefulSet) │◄── identity-keycloak-postgresql-*-password
+                       │              Keycloak (OIDC)             │◄── admin-password
+                       │      + embedded PostgreSQL (StatefulSet) │◄── admin/user-password
                        └───────────────▲─────────────────────────┘
                                        │ OIDC
         ┌──────────────┬───────────────┼───────────────┬──────────────┬───────────┐
-        │              │               │               │              │           │
    Orchestration   Management       Optimize        Connectors    Web Modeler   Console
-   (Zeebe broker/  Identity                                       (+ PostgreSQL)
-   gateway +       (Deployment)                                    StatefulSet
-   Operate +           │               │                              │
-   Tasklist)           │               │                              │
-   StatefulSet         │               │                              │
-        │              │               │                              │
-        └──────────────┴───────────────┴──────────────────────────────┘
-                                   │
-                          Elasticsearch (X-Pack security)
-                          StatefulSet, elastic / <vault password>
+   (Zeebe+Operate+ Identity                                       (+ PostgreSQL)
+    Tasklist)      (Deployment)     (Deployment)    (Deployment)   (Deployments)  (Deployment)
+   StatefulSet
+   camunda-zeebe
+        │                              │                              │
+        └──────────────┬───────────────┴──────────────────────────────┘
+                        │
+               Elasticsearch (X-Pack security) — elastic / <vault password>
+               StatefulSet camunda-elasticsearch-master
 ```
 
-- **Auth**: `global.security.authentication.method=oidc` + internal **Keycloak**.
-  Operate/Tasklist/Optimize/Web Modeler/Console authenticate via Keycloak.
-- **Secondary storage**: Orchestration + Optimize use the bundled **Elasticsearch**
-  with X-Pack security; the `elastic` password comes from Vault.
-- **Databases**: Keycloak's embedded PostgreSQL and Web Modeler's PostgreSQL;
-  both passwords come from Vault.
+## Per-app secret model (Msg 309)
 
-## Secret flow (dynamic, from Vault)
+Each **app that consumes a Vault-sourced secret at runtime** gets full isolation:
+its own **ServiceAccount**, its own **Vault role+policy**, its own **Kubernetes
+Secret**, and a **watch sidecar** that rollout-restarts **only that workload**.
+
+| App | SA | Vault role/policy (read) | Secret | Restarts (rollout) |
+|---|---|---|---|---|
+| Orchestration | `camunda-vault-orchestration` | `camunda/elasticsearch` | `camunda-orchestration-secret` | `StatefulSet/camunda-zeebe` |
+| Optimize | `camunda-vault-optimize` | `camunda/elasticsearch` | `camunda-optimize-secret` | `Deployment/camunda-optimize` |
+| Web Modeler | `camunda-vault-web-modeler` | `camunda/postgres/webmodeler` | `camunda-web-modeler-db-secret` | `Deployment/camunda-web-modeler-restapi` |
+
+**Datastore secrets** (no sidecar) are seeded once by the bootstrap Job and
+consumed natively via `existingSecret`:
+
+| Secret | Consumed by |
+|---|---|
+| `camunda-elasticsearch-secret` | Elasticsearch StatefulSet |
+| `camunda-keycloak-secret` | Keycloak (admin) |
+| `camunda-keycloak-db-secret` | Keycloak PostgreSQL |
+| `camunda-web-modeler-db-secret` | Web Modeler PostgreSQL (same secret the restapi sidecar maintains) |
+
+**Identity / Connectors / Console get no sidecar** — they authenticate via
+Keycloak (OIDC) and hold no Vault-sourced DB password, so attaching an agent
+would add RBAC for no benefit. (To change this, add a `sidecar:` block under the
+relevant entry in `vaultAgent.targets`.)
+
+## Secret flow
 
 ```
-HashiCorp Vault (KV v2)                      Kubernetes
-  secret/camunda/elasticsearch  ─┐
-  secret/camunda/keycloak        │  vault-agent     ┌────────────────────────┐
-  secret/camunda/postgres/keycloak ─► (k8s auth,    │ Secret camunda-creds   │
-  secret/camunda/postgres/webmodeler │  SA JWT) ───► │  elasticsearch-password│
-                                  ┘                  │  identity-keycloak-*   │
-                                                     │  web-modeler-*         │
-                                                     └──────────▲─────────────┘
-                                                                │ existingSecret
-                       ES / Keycloak / PostgreSQL / Orchestration / Optimize / WebModeler
+HashiCorp Vault (KV v2)                         Kubernetes
+  secret/camunda/elasticsearch ─┐
+  secret/camunda/keycloak        │  bootstrap Job (broad-read role)
+  secret/camunda/postgres/keycloak ─► creates ALL *-secret objects ──► datastores boot
+  secret/camunda/postgres/webmodeler ┘
+
+  secret/camunda/elasticsearch ──► orchestration sidecar (narrow role) ──► camunda-orchestration-secret ──► restart camunda-zeebe
+  secret/camunda/elasticsearch ──► optimize sidecar     (narrow role) ──► camunda-optimize-secret      ──► restart camunda-optimize
+  secret/camunda/postgres/webmodeler ► web-modeler sidecar (narrow role) ► camunda-web-modeler-db-secret ► restart restapi
 ```
 
 1. **Bootstrap Job** (Helm `pre-install`/`pre-upgrade` hook) runs `agent fetch`
-   first, so `camunda-credentials` exists **before** any database pod boots.
-2. Every Camunda **application** pod gets:
-   - `vault-gencert` init → self-signed cert into a shared volume
-   - `vault-fetch` init → re-reconciles `camunda-credentials` before the app starts
-   - `vault-agent` sidecar → `watch`es Vault and restarts the module on rotation
-3. The bundled **Elasticsearch / Keycloak / PostgreSQL** pods simply consume
-   `camunda-credentials` via their native `existingSecret` settings (no sidecar
-   needed; the bootstrap Job guarantees the secret is present).
+   once and seeds **every** secret before any datastore pod boots.
+2. Each sidecar-enabled app pod gets a `vault-fetch` **init** (reconcile before
+   start) + a `vault-agent` **watch** sidecar (reconcile on interval, then
+   `rollout restart` its own workload on change).
+
+## TLS trust — OpenShift service-ca (no `gencert`)
+
+There is **no self-signed certificate generation**. Trust comes from the cluster:
+
+- The chart creates an empty **`trusted-ca` ConfigMap** annotated
+  `service.beta.openshift.io/inject-cabundle: "true"`. The OpenShift **service-ca
+  operator** populates the `service-ca.crt` key.
+- It is mounted into every agent container **and** every app container at
+  `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, so curl (→ Vault) and the
+  JVM (→ Elasticsearch/Keycloak) trust in-cluster service-serving certificates.
+- **HAProxy TLS** uses an OpenShift **service-serving-cert**: the HAProxy Service
+  is annotated `service.beta.openshift.io/serving-cert-secret-name: camunda-haproxy-tls`
+  and OpenShift mints that `kubernetes.io/tls` secret.
+
+On vanilla Kubernetes set `vaultAgent.trustedCa.openshiftInject=false` and paste
+your PEM into `vaultAgent.trustedCa.caBundle`; set `haproxy.tls.openshiftServiceCA=false`
+and provide your own `kubernetes.io/tls` secret in `haproxy.tls.secretName`.
+
+## Deployment — ArgoCD via GitLab CI (no Helm post-render)
+
+The previous Helm `--post-renderer` step is **gone**: per-app rollout restarts
+removed the need to inject `shareProcessNamespace`, so the chart renders to plain
+manifests with no post-processing.
+
+`.gitlab-ci.yml` (repo root) runs `helm template`, converts the Helm install
+hooks into **ArgoCD PreSync hooks + sync-waves** (so SA/RBAC/ConfigMaps/trusted-ca
+apply before the bootstrap Job, which applies before datastores/apps), validates
+with `kubeconform`, and commits the rendered YAML to the GitOps repo ArgoCD
+watches. This "rendered manifests" pattern is auditable and air-gap friendly.
 
 ## Why this is least-privilege / air-gap friendly
 
-- **No Vault Agent Injector** → no cluster-wide mutating webhook, no broad RBAC.
-- **Vault Kubernetes auth** → no static secrets in the cluster; tokens are short-lived.
-- **Agent RBAC** = `create` on secrets + `get/update/patch` on the single
-  `camunda-credentials` secret. Nothing else.
-- **Restart via SIGNAL** (shared PID namespace) → **zero** RBAC for restarts.
-- **Image** = alpine + curl/jq/openssl; runs **non-root (UID 1001)**,
-  `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, all capabilities dropped.
-- Everything is mirror-able into a private registry; no external pulls at runtime.
+- **No Vault Agent Injector** → no cluster-wide mutating webhook.
+- **Vault Kubernetes auth**, **per-app role+policy** → each app's token can read
+  only its own Vault paths; no static secrets in the cluster.
+- **Per-app RBAC** = `create` secrets + `get/update/patch` on **its own** Secret +
+  `get/patch` on **its own** workload. Nothing else, nothing cross-app.
+- **Image** = alpine + curl/jq; runs **non-root**, `readOnlyRootFilesystem`,
+  `allowPrivilegeEscalation:false`, all capabilities dropped, `RuntimeDefault` seccomp.
+- Everything mirror-able into a private registry; no external pulls at runtime.
 
-## Security hardening toggles
+## NetworkPolicy and alternatives (for clusters without NetworkPolicy)
 
-| Toggle | Default | Effect |
-|---|---|---|
-| `vaultAgent.rbac.create` | `true` | Creates the Role/RoleBinding (create + get/update/patch on the single `camunda-credentials` Secret). Set **`false`** for a zero-RBAC agent. |
-| `vaultAgent.networkPolicy.enabled` | `true` | Locks the dedicated **bootstrap Job** pod's egress to DNS + Vault (`vaultPort`) + API server (`apiServerPort`) only. |
-| `vaultAgent.vault.caCert` | `""` | Vault CA (PEM) for verified HTTPS; published as `camunda-vault-agent-ca` and mounted into every agent container. |
-| `vaultAgent.restart.mode` | `signal` | `signal` = in-pod SIGTERM (no restart RBAC); `rollout` = scoped workload patch; `none`. |
+The chart ships **one egress NetworkPolicy** scoped to the **bootstrap Job** pod
+(`vaultAgent.networkPolicy.enabled=true`): it allows only DNS + Vault (`vaultPort`)
++ the Kubernetes API server (`apiServerPort`). The per-app **sidecars share their
+module's pod network**, so they cannot be isolated by a Job-scoped policy.
 
-### Zero-RBAC posture (honest scope)
-Setting `rbac.create=false` removes **all** Kubernetes RBAC for the agent. To use
-it end-to-end you must **also** switch secret delivery from the Kubernetes Secret
-to the shared-**file** mechanism, because writing a Secret needs API rights:
+If your cluster **does not support `networking.k8s.io/v1` NetworkPolicy**, or you
+need to constrain the sidecars too, use one of these instead:
 
-- move each mapping from `entries:` to `files:` (the agent writes the value to a
-  shared volume), and
-- point each component at that file (bitnami `*_FILE` env / app config).
+- **OpenShift `EgressFirewall`** (per-namespace, OVN-Kubernetes): allow egress
+  only to the Vault CIDR + API server, deny the rest. This is the recommended
+  control on ROKS where the SDN supports it cluster-wide.
+- **`EgressNetworkPolicy`** (older OpenShift SDN) — equivalent, namespace-scoped.
+- **Egress gateway / proxy**: force all pod egress through a controlled HTTP(S)
+  proxy (set `HTTPS_PROXY`) that only whitelists the Vault host; the agent's curl
+  honors the proxy env vars.
+- **Calico/Cilium GlobalNetworkPolicy** if a CNI with its own CRD is installed
+  (these work even where stock `NetworkPolicy` enforcement is absent).
+- **Service mesh (Istio/OSSM) `Sidecar` + `AuthorizationPolicy`**: restrict
+  egress to the Vault ServiceEntry only.
+- **No-policy fallback**: rely on Vault's own `bound_service_account_*` (a stolen
+  token from another namespace can't authenticate) + per-app Vault policies (a
+  compromised app token reads only its own paths). Set
+  `vaultAgent.networkPolicy.enabled=false` and document the compensating control.
 
-The agent fully supports file mode (verified), and `restart.mode=signal` needs no
-RBAC. However, **rewiring every bundled component (Elasticsearch / Keycloak /
-PostgreSQL / Camunda apps) to read its password from a file instead of a k8s
-Secret is component-specific and must be validated on a real cluster** — those
-subcharts consume a Secret by default. Therefore the shipped default keeps the
-Kubernetes-Secret design (RBAC scoped to one Secret), which is already minimal,
-and the file/zero-RBAC path is provided as a documented, opt-in alternative.
+To also constrain the **app/sidecar** pods directly, add a module-level egress
+NetworkPolicy keyed on the Camunda component labels (e.g.
+`app.kubernetes.io/component: zeebe-broker`).
 
 ## Trade-offs / notes
 
-- **Signal restart** requires `shareProcessNamespace: true`, injected by the
-  `post-render/` kustomize overlay because the upstream chart does not expose it.
-  If you cannot use a post-renderer, switch `vaultAgent.restart.mode=rollout` and
-  enable the scoped `apps` RBAC rule in `templates/vault-rbac.yaml`.
-- **Elasticsearch REST** is HTTP + basic-auth (internal ClusterIP). Transport TLS
-  is auto-generated. For end-to-end REST TLS, enable `security.tls.restEncryption`
-  and feed the orchestration/optimize truststore (the `gencert` init container or
-  a CA ConfigMap can provide the material).
-- **Rotating a database's *stored* password** (vs. the client-side credential) is a
-  separate operational procedure (change it in the DB engine too); this delivery
-  rotates the credential the clients use and restarts the clients.
+- **Rotating a *datastore* password** (ES/Keycloak/Postgres) only re-seeds the
+  secret on the next bootstrap run; those pods have no sidecar, so restart them
+  (and rotate the password inside the engine) per the runbook. The **app** side
+  (orchestration/optimize/web-modeler restapi) auto-reconciles + restarts.
+- **Elasticsearch REST** is HTTP + basic-auth on the internal ClusterIP; transport
+  TLS is auto-generated. For end-to-end REST TLS, enable
+  `security.tls.restEncryption` and feed the orchestration/optimize truststore
+  from the `trusted-ca` bundle.
+- **service-ca injection race**: the bootstrap Job may start a moment before the
+  service-ca operator populates `trusted-ca`; the Job's `backoffLimit` absorbs
+  this (it retries and succeeds once the bundle is present).

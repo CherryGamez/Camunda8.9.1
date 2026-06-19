@@ -1,22 +1,22 @@
+{{- $va := .Values.vaultAgent -}}
 {{/*
-ServiceAccount + minimal, least-privilege RBAC for the Vault agent.
+Per-app, least-privilege RBAC for the Vault agent.
 
-These are installed as pre-install / pre-upgrade hooks (with ascending weights)
-so that they exist *before* the bootstrap Job runs, and they persist for the
-lifetime of the release because the module sidecars reference them by name.
+  * Each sidecar-enabled app gets its OWN ServiceAccount + Role + RoleBinding.
+    The Role allows: create Secrets (cannot be name-restricted), get/update/patch
+    ONLY that app's Secret, and get/patch ONLY that app's own workload (for the
+    rollout restart). Nothing else.
+  * The bootstrap Job gets a separate ServiceAccount that may create + get/
+    update/patch ONLY the named secrets it seeds. It performs no restarts.
 
-Least privilege:
-  * The agent may CREATE secrets and GET/UPDATE/PATCH only the single
-    `camunda-credentials` secret. Nothing else.
-  * Module restart uses the in-pod SIGNAL mechanism (RESTART_MODE=signal),
-    which needs NO Kubernetes RBAC at all.
-  * If you switch RESTART_MODE=rollout, uncomment the apps/* rule below and
-    scope it to your workload names.
+All are pre-install/pre-upgrade hooks so they exist before the bootstrap Job
+and persist for the lifetime of the release (module pods reference them by name).
 */}}
+{{/* ----------------------- bootstrap ServiceAccount + RBAC ----------------------- */}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ .Values.vaultAgent.serviceAccountName }}
+  name: {{ $va.bootstrap.serviceAccountName }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/part-of: camunda-platform
@@ -25,37 +25,33 @@ metadata:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-20"
     helm.sh/hook-delete-policy: before-hook-creation
+{{- if $va.rbac.create }}
 ---
-{{- if .Values.vaultAgent.rbac.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ .Values.vaultAgent.serviceAccountName }}
+  name: {{ $va.bootstrap.serviceAccountName }}
   namespace: {{ .Release.Namespace }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-15"
     helm.sh/hook-delete-policy: before-hook-creation
 rules:
-  # Creating the secret the first time (create cannot be restricted by name).
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
-  # Reading / rotating ONLY the single managed secret.
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["{{ .Values.vaultAgent.secretName }}"]
+    resourceNames:
+    {{- range $va.targets }}
+      - {{ .secretName }}
+    {{- end }}
     verbs: ["get", "update", "patch"]
-  # --- Optional: only needed if RESTART_MODE=rollout (not for signal mode) ---
-  # - apiGroups: ["apps"]
-  #   resources: ["deployments", "statefulsets"]
-  #   resourceNames: ["camunda-zeebe", "camunda-identity", "camunda-optimize", "camunda-connectors", "camunda-console", "camunda-web-modeler-restapi"]
-  #   verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ .Values.vaultAgent.serviceAccountName }}
+  name: {{ $va.bootstrap.serviceAccountName }}
   namespace: {{ .Release.Namespace }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -64,9 +60,73 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ .Values.vaultAgent.serviceAccountName }}
+  name: {{ $va.bootstrap.serviceAccountName }}
 subjects:
   - kind: ServiceAccount
-    name: {{ .Values.vaultAgent.serviceAccountName }}
+    name: {{ $va.bootstrap.serviceAccountName }}
     namespace: {{ .Release.Namespace }}
+{{- end }}
+{{/* ----------------------- per-app ServiceAccounts + RBAC ----------------------- */}}
+{{- range $va.targets }}
+{{- if .sidecar }}
+{{- $wlres := ternary "statefulsets" "deployments" (eq .sidecar.workload.kind "StatefulSet") }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .sidecar.serviceAccountName }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
+{{- if $va.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .sidecar.serviceAccountName }}
+  namespace: {{ $.Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  # Create the per-app secret the first time (create cannot be name-scoped).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  # Read / rotate ONLY this app's secret.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ .secretName }}"]
+    verbs: ["get", "update", "patch"]
+  # Rollout-restart ONLY this app's own workload.
+  - apiGroups: ["apps"]
+    resources: ["{{ $wlres }}"]
+    resourceNames: ["{{ .sidecar.workload.name }}"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .sidecar.serviceAccountName }}
+  namespace: {{ $.Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-14"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .sidecar.serviceAccountName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .sidecar.serviceAccountName }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
 {{- end }}

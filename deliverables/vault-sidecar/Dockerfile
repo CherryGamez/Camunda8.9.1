@@ -5,8 +5,8 @@
 FROM alpine:3.20
 
 # busybox already provides sh / base64 / cat / tr / date / grep.
-# Add only curl (HTTP), jq (JSON), openssl (self-signed certs), ca-certificates.
-RUN apk add --no-cache ca-certificates curl jq openssl \
+# Add only curl (HTTP), jq (JSON), ca-certificates.
+RUN apk add --no-cache ca-certificates curl jq \
  && rm -rf /var/cache/apk/*
 
 COPY agent.sh /usr/local/bin/camunda-vault-agent

@@ -1,63 +1,82 @@
-# PRD — Camunda 8.9 Self-Managed + HashiCorp Vault (air-gapped, IBM Cloud)
+# PRD — Camunda 8.9 Self-Managed + HashiCorp Vault (air-gapped, OpenShift/ROKS)
 
 ## Problem statement (verbatim intent)
 Prepare an umbrella `values.yaml` for the Camunda 8.9.1 charts (camunda-platform
-14.0.1) with all modules working and communicating (including Keycloak). The
-PostgreSQL and Elasticsearch passwords must be fetched **dynamically** from
-HashiCorp Vault by a **sidecar**. Provide the sidecar's Dockerfile and Helm
-charts so it can be deployed to an IBM Cloud cluster. Add an init container for a
-self-signed certificate. The sidecar must work for all modules, fetch secrets
-from Vault **using a ServiceAccount name** (k8s auth), and **restart the attached
-module**. Keep rights minimal (air-gapped + enterprise policy): minimal
-functionality, fetch secrets for the module and restart it.
+14.0.1) with all modules working and communicating (incl. Keycloak). PostgreSQL
+and Elasticsearch passwords must be fetched **dynamically** from HashiCorp Vault
+by a **sidecar** (Dockerfile + Helm charts for IBM Cloud). The sidecar must use
+**Kubernetes ServiceAccount auth**, have **minimal rights** (air-gapped), and
+**restart the attached module**. HAProxy is the single external entry point with
+TLS.
+
+### Msg 309 corrections (current scope)
+- **Per-app ServiceAccounts** + per-app Vault roles/policies + per-app Secrets.
+- The sidecar restarts **only its own** workload (rollout mode, scoped RBAC).
+- Drop self-signed `gencert` → mount the OpenShift **service-ca** `trusted-ca`
+  ConfigMap (key `service-ca.crt` → `tls-ca-bundle.pem`).
+- HAProxy TLS via OpenShift **service-serving-cert** (no self-signed).
+- Deploy via **ArgoCD**: render with `helm template` in **GitLab CI** (no Helm
+  post-renderer / no `shareProcessNamespace`).
+- Document **NetworkPolicy alternatives** for clusters without NetworkPolicy.
 
 ## User choices (gathered)
-- Target cluster: **both** IKS and OpenShift.
-- Vault auth: **Kubernetes auth** (pod ServiceAccount JWT).
-- Secret delivery: agent's choice → single `camunda-credentials` Kubernetes Secret
-  (chart-native), plus optional shared-file mode.
-- Restart: **in-pod signal** (shared process namespace) as default; rollout as fallback.
-- Modules: **all** (Orchestration, Identity, Keycloak, Connectors, Optimize,
-  Web Modeler, Console, Elasticsearch, 2× PostgreSQL).
-- Sidecar language: switched from Go to **shell + curl** per user request.
+- Restart model: **per-app rollout** (a).
+- Platform: **OpenShift / ROKS on IBM Cloud**, service-ca annotations (a).
+- Secrets: **per-app secrets** (strongest isolation) (a).
+- Sidecar language: **shell + curl**.
 
-## Architecture (implemented)
-- Umbrella Helm chart depends on `camunda-platform` 14.0.1 (vendored tgz for air-gap).
-- `camunda-vault-agent` (shell+curl, alpine, non-root): `gencert | fetch | watch`.
-- Vault k8s auth → reads `secret/camunda/*` (KV v2) → reconciles `camunda-credentials`.
-- Pre-install/upgrade **bootstrap Job** creates the secret before DB pods boot.
-- Each Camunda app module gets: `vault-gencert` init, `vault-fetch` init,
-  `vault-agent` watch sidecar, shared volumes.
-- Restart: signal mode via `shareProcessNamespace` injected by post-render kustomize.
-- RBAC: create + get/update/patch on the single `camunda-credentials` secret. No more.
+## Architecture (implemented 2026-06-19)
+- Umbrella chart depends on `camunda-platform` 14.0.1 (vendored tgz, offline).
+- `vaultAgent.targets[]` drives everything: each target = a Secret + mappings;
+  targets with a `sidecar:` block also get an SA, Vault role, watch sidecar and a
+  rollout target.
+  - Sidecar apps: **orchestration** (StatefulSet `camunda-zeebe`), **optimize**
+    (Deployment `camunda-optimize`), **web-modeler** (Deployment
+    `camunda-web-modeler-restapi`).
+  - Datastore-only secrets (bootstrap-seeded, no sidecar): elasticsearch,
+    keycloak (admin), keycloak-db, web-modeler-db.
+  - Identity / Connectors / Console: **no sidecar** (OIDC, no Vault DB secret).
+- `agent.sh` (shell+curl): `fetch` | `watch`. Multi-secret config schema
+  (`{vaultRole, secrets:[{secretName, entries}]}`); `rollout`/`none` restart.
+- Bootstrap Job (pre-install hook) seeds ALL secrets before datastores boot.
+- Per-app RBAC: create secrets + get/update/patch **own** Secret + get/patch
+  **own** workload. Bootstrap SA: create + get/update/patch the named secrets.
+- TLS trust: `trusted-ca` ConfigMap (OpenShift `inject-cabundle`), mounted into
+  every agent + app container; `VAULT_CACERT` points at the bundle.
+- HAProxy single entry point: path routing + Zeebe gRPC TCP + TLS via service-ca
+  serving cert (`service.beta.openshift.io/serving-cert-secret-name`).
+- `.gitlab-ci.yml`: `helm template` → yq converts Helm hooks → ArgoCD PreSync +
+  sync-waves → kubeconform → commit to GitOps repo.
 
-## Status — implemented & verified (2026-06-18 / live-tested 2026-06-19)
-- **LIVE integration test on a real Kubernetes API server (k3s control-plane) + real Vault:**
-  Vault Kubernetes-auth (SA JWT → real TokenReview), agent created camunda-credentials
-  (6 keys = Vault values), idempotent re-run, rotation (single-key patch), rollout-restart
-  (real Deployment annotation), least-privilege RBAC enforced by apiserver (can-i: create+get-own
-  only). All 66 rendered manifests pass `kubectl apply --dry-run=server`.
-- A real latent bug (K_CODE subshell scope on the k8s path) was found by the live test and fixed.
-- HAProxy single entry point + built-in TLS (8443, 443→8443, http→https redirect, self-signed
-  init or kubernetes.io/tls existingSecret); `haproxy -c` validates incl. TLS bind. gRPC 26500.
-- Path-prefix routing + per-module contextPaths + OIDC publicIssuerUrl/redirectUrls (https).
-- Vault agent also verified against a live TLS Vault (HTTPS w/ CA, clean fatal, skip-verify).
-- Security toggles: rbac.create (zero-RBAC), networkPolicy (bootstrap egress DNS+Vault+API),
-  vault.caCert (HTTPS CA in every agent container).
-- NOT verifiable here: full Camunda Java pods (sandbox = 2 GB RAM + kubelet blocked / no /dev/kmsg).
+## Status — validated in build env (2026-06-19)
+- `helm lint` clean; `helm template` renders 81 docs; all parse as valid YAML.
+- Verified rendered: per-app SAs/Roles(scoped to one secret + one workload)/
+  RoleBindings; per-app Vault roles in config; per-app Secrets wired via
+  `existingSecret`; correct rollout `RESTART_TARGET_*`; `trusted-ca`
+  inject-cabundle annotation; HAProxy serving-cert annotation.
+- `agent.sh` multi-secret config parsing jq-validated; bash `-n` syntax OK.
+- GitLab CI yq hook→ArgoCD transform tested on real render: 0 helm hooks left,
+  17 ArgoCD hooks, sync-waves -20..0 in correct dependency order.
+- Removed: `umbrella/post-render/`, `vault-ca-configmap.yaml`, `gencert`.
 
-## NOT verified here (needs a real cluster)
-- Full Camunda end-to-end boot on IBM Cloud (no cluster/Vault/registry in build env).
-- Live Kubernetes Secret create/patch and signal/rollout restart on a running pod.
-  → Smoke-test on non-prod per docs/IBM-Cloud-deploy.md before production.
+## NOT verified here (needs a real OpenShift cluster)
+- service-ca operator injection of `trusted-ca` / HAProxy serving cert.
+- Full Camunda Java pods boot, live secret create/patch + rollout restart.
+- End-to-end ArgoCD sync of the rendered manifests.
+→ Smoke-test on non-prod ROKS per docs/IBM-Cloud-deploy.md.
 
 ## Backlog / next
-- P1: Optional REST TLS for Elasticsearch (truststore wiring into orchestration/optimize).
-- P1: Projected SA token (audience=vault) volume for stricter Vault audience binding.
-- P2: Ingress + external OIDC issuer/redirect URLs for browser access.
+- P1: Optional REST TLS for Elasticsearch (truststore from trusted-ca into
+  orchestration/optimize).
+- P1: Projected SA token (audience=vault) for stricter Vault audience binding.
 - P2: DB-side password rotation runbook (rotate stored password in engine + Vault).
-- P2: NetworkPolicies restricting agent egress to Vault + API server only.
+- P2: Module-level egress NetworkPolicies for the sidecar pods (labels-based).
+- P2: OpenShift EgressFirewall sample manifest (referenced in ARCHITECTURE.md).
 
 ## Deliverables location
-`/app/deliverables/` (umbrella/, vault-sidecar/, vault/, docs/). Push to the user's
-GitHub repo via the chat "Save to Github" feature.
+`/app/deliverables/` (`.gitlab-ci.yml`, umbrella/, vault-sidecar/, vault/, docs/).
+Push to the user's GitHub via the chat "Save to Github" feature.
+
+## Credentials
+No app credentials created. Vault admin token + seeded passwords are user/Vault
+provided at runtime; nothing hardcoded. (test_credentials.md not applicable.)

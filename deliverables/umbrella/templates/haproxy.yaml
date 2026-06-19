@@ -141,23 +141,13 @@ spec:
         - name: tls-init
           image: {{ $.Values.vaultAgent.image | quote }}
           imagePullPolicy: {{ $.Values.vaultAgent.imagePullPolicy }}
-{{- if $h.tls.existingSecret }}
-          command: ["sh", "-c", "cat /tls-src/tls.crt /tls-src/tls.key > /etc/haproxy/tls/tls.pem && echo assembled PEM from {{ $h.tls.existingSecret }}"]
-{{- else }}
-          command: ["sh", "-c", "camunda-vault-agent gencert && cat $CERT_DIR/tls.crt $CERT_DIR/tls.key > /etc/haproxy/tls/tls.pem && echo generated self-signed PEM"]
-          env:
-            - { name: CERT_DIR, value: /etc/haproxy/tls }
-            - { name: CERT_CN,  value: {{ $h.host | quote }} }
-            - { name: CERT_SANS, value: {{ $h.host | quote }} }
-{{- end }}
+          command: ["sh", "-c", "cat /tls-src/tls.crt /tls-src/tls.key > /etc/haproxy/tls/tls.pem && echo assembled PEM from {{ $h.tls.secretName }}"]
           volumeMounts:
             - name: tls
               mountPath: /etc/haproxy/tls
-{{- if $h.tls.existingSecret }}
             - name: tls-src
               mountPath: /tls-src
               readOnly: true
-{{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -212,11 +202,9 @@ spec:
 {{- if $h.tls.enabled }}
         - name: tls
           emptyDir: {}
-{{- if $h.tls.existingSecret }}
         - name: tls-src
           secret:
-            secretName: {{ $h.tls.existingSecret }}
-{{- end }}
+            secretName: {{ $h.tls.secretName }}
 {{- end }}
 ---
 apiVersion: v1
@@ -227,7 +215,11 @@ metadata:
   labels:
     app.kubernetes.io/part-of: camunda-platform
     app.kubernetes.io/component: haproxy
-  {{- with $h.service.annotations }}
+  {{- $svcAnn := $h.service.annotations | default dict }}
+  {{- if and $h.tls.enabled $h.tls.openshiftServiceCA }}
+  {{- $svcAnn = merge (dict "service.beta.openshift.io/serving-cert-secret-name" $h.tls.secretName) $svcAnn }}
+  {{- end }}
+  {{- with $svcAnn }}
   annotations: {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:

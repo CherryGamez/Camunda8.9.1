@@ -1,11 +1,11 @@
 {{- $va := .Values.vaultAgent -}}
 {{/*
 Bootstrap Job: runs `camunda-vault-agent fetch` once, before the main release
-resources are created, so that the `camunda-credentials` Secret already exists
-when Elasticsearch / Keycloak / PostgreSQL pods boot and resolve it via env.
+resources, so ALL per-app Secrets already exist when Elasticsearch / Keycloak /
+PostgreSQL pods boot and resolve them via env.
 
-It is a pre-install / pre-upgrade hook (weight 0, after the SA/RBAC/ConfigMap
-hooks above). Idempotent: on every install/upgrade it reconciles the secret.
+pre-install/pre-upgrade hook (weight 0, after the SA/RBAC/ConfigMap hooks).
+Idempotent: reconciles every secret on each install/upgrade. Performs no restart.
 */}}
 apiVersion: batch/v1
 kind: Job
@@ -29,7 +29,7 @@ spec:
         app.kubernetes.io/part-of: camunda-platform
         app.kubernetes.io/component: vault-agent-bootstrap
     spec:
-      serviceAccountName: {{ $va.serviceAccountName }}
+      serviceAccountName: {{ $va.bootstrap.serviceAccountName }}
       restartPolicy: Never
       securityContext:
         runAsNonRoot: true
@@ -56,9 +56,9 @@ spec:
               readOnly: true
             - name: vault-tmp
               mountPath: /tmp
-            {{- if $va.vault.caCert }}
-            - name: vault-ca
-              mountPath: /vault/ca
+            {{- if $va.trustedCa.enabled }}
+            - name: trusted-ca
+              mountPath: /etc/pki/ca-trust/extracted/pem
               readOnly: true
             {{- end }}
           securityContext:
@@ -76,11 +76,15 @@ spec:
       volumes:
         - name: vault-agent-config
           configMap:
-            name: camunda-vault-agent-config
+            name: camunda-vault-bootstrap-config
         - name: vault-tmp
           emptyDir: {}
-        {{- if $va.vault.caCert }}
-        - name: vault-ca
+        {{- if $va.trustedCa.enabled }}
+        - name: trusted-ca
           configMap:
-            name: camunda-vault-agent-ca
+            name: {{ $va.trustedCa.configMapName }}
+            optional: true
+            items:
+              - key: service-ca.crt
+                path: tls-ca-bundle.pem
         {{- end }}

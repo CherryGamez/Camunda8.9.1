@@ -1,13 +1,11 @@
 {
-  "secretName": "camunda-credentials",
-  "secretNamespace": "",
-  "entries": [
-    { "vaultPath": "secret/data/camunda/elasticsearch",       "field": "password",      "secretKey": "elasticsearch-password" },
-    { "vaultPath": "secret/data/camunda/keycloak",            "field": "admin-password", "secretKey": "identity-keycloak-admin-password" },
-    { "vaultPath": "secret/data/camunda/postgres/keycloak",   "field": "admin-password", "secretKey": "identity-keycloak-postgresql-admin-password" },
-    { "vaultPath": "secret/data/camunda/postgres/keycloak",   "field": "user-password",  "secretKey": "identity-keycloak-postgresql-user-password" },
-    { "vaultPath": "secret/data/camunda/postgres/webmodeler", "field": "admin-password", "secretKey": "web-modeler-postgresql-admin-password" },
-    { "vaultPath": "secret/data/camunda/postgres/webmodeler", "field": "user-password",  "secretKey": "web-modeler-postgresql-user-password" }
-  ],
-  "files": []
+  "vaultRole": "camunda-optimize",
+  "secrets": [
+    {
+      "secretName": "camunda-optimize-secret",
+      "entries": [
+        { "vaultPath": "secret/data/camunda/elasticsearch", "field": "password", "secretKey": "elasticsearch-password" }
+      ]
+    }
+  ]
 }

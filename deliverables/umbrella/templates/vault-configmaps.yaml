@@ -1,26 +1,12 @@
 {{- $va := .Values.vaultAgent -}}
 {{/*
-ConfigMaps consumed by every Camunda module's vault init-container & sidecar,
-and by the bootstrap Job. Installed as pre-install/pre-upgrade hooks so they
-exist before the bootstrap Job runs, and they persist for the module pods.
+ConfigMaps for the Vault agent. Installed as pre-install/pre-upgrade hooks so
+they exist before the bootstrap Job runs and before the module pods start.
+
+  * camunda-vault-agent-env          : shared Vault connection settings (envFrom)
+  * camunda-vault-bootstrap-config   : ALL secret targets (seeded by the Job)
+  * camunda-vault-<name>-config      : one secret target per sidecar-enabled app
 */}}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: camunda-vault-agent-config
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app.kubernetes.io/part-of: camunda-platform
-    app.kubernetes.io/component: vault-agent
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-10"
-    helm.sh/hook-delete-policy: before-hook-creation
-data:
-  config.json: |
-    {{- $cfg := dict "secretName" $va.secretName "entries" $va.mappings "files" (list) }}
-    {{ toJson $cfg | nindent 4 }}
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -36,13 +22,49 @@ metadata:
 data:
   VAULT_ADDR: {{ $va.vault.addr | quote }}
   VAULT_AUTH_PATH: {{ $va.vault.authPath | quote }}
-  VAULT_ROLE: {{ $va.vault.role | quote }}
   VAULT_NAMESPACE: {{ $va.vault.namespace | quote }}
   VAULT_SKIP_VERIFY: {{ $va.vault.skipVerify | quote }}
-  {{- if $va.vault.caCert }}
-  VAULT_CACERT: "/vault/ca/ca.crt"
+  {{- if $va.trustedCa.enabled }}
+  VAULT_CACERT: "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
   {{- end }}
   CONFIG_FILE: "/etc/camunda-vault-agent/config.json"
   INTERVAL_SECONDS: {{ $va.intervalSeconds | quote }}
-  RESTART_MODE: {{ $va.restart.mode | quote }}
-  RESTART_PROCESS_MATCH: {{ $va.restart.processMatch | quote }}
+  RESTART_MODE: "rollout"
+---
+{{/* Bootstrap config: every target's secret, reconciled once before boot. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camunda-vault-bootstrap-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  config.json: |
+    {{- $secrets := list }}
+    {{- range $va.targets }}
+    {{- $secrets = append $secrets (dict "secretName" .secretName "entries" .mappings) }}
+    {{- end }}
+    {{ dict "vaultRole" $va.bootstrap.vaultRole "secrets" $secrets | toJson | nindent 4 }}
+{{- range $va.targets }}
+{{- if .sidecar }}
+---
+{{/* Per-app config: only this app's single secret. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camunda-vault-{{ .name }}-config
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+data:
+  config.json: |
+    {{ dict "vaultRole" .sidecar.vaultRole "secrets" (list (dict "secretName" .secretName "entries" .mappings)) | toJson | nindent 4 }}
+{{- end }}
+{{- end }}

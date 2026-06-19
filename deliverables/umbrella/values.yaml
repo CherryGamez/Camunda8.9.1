@@ -1,87 +1,131 @@
 # =============================================================================
-# Camunda 8.9 Self-Managed + HashiCorp Vault — Umbrella values
+# Camunda 8.9 Self-Managed + HashiCorp Vault — Umbrella values (OpenShift / ROKS)
 # -----------------------------------------------------------------------------
-# All PostgreSQL / Keycloak / Elasticsearch passwords are sourced DYNAMICALLY
-# from HashiCorp Vault by the `camunda-vault-agent` sidecar (Kubernetes auth,
-# pod ServiceAccount). The agent reconciles them into ONE Kubernetes Secret
-# (`camunda-credentials`) which every component already references by default.
+# Design (per Msg 309 corrections):
+#   * PER-APP isolation. Each Camunda app that consumes a Vault-sourced secret
+#     gets its OWN ServiceAccount, its OWN Vault role/policy, its OWN Kubernetes
+#     Secret, and a watch sidecar that rollout-restarts ONLY that one workload.
+#   * No self-signed `gencert`. TLS trust comes from the OpenShift service-ca
+#     bundle, surfaced via the `trusted-ca` ConfigMap
+#     (key service-ca.crt -> mounted as tls-ca-bundle.pem).
+#   * HAProxy TLS uses an OpenShift service-serving-cert (no self-signed).
+#   * Deployed via ArgoCD: render with `helm template` in GitLab CI (see
+#     ../.gitlab-ci.yml). NO Helm post-render / kustomize step is required,
+#     because per-app rollout restarts remove the need for shareProcessNamespace.
 #
-# Conventions assumed by this file (change in lock-step if you customise):
-#   * Release name : camunda      (helm install camunda ...)
-#   * Namespace    : camunda
-#   * Service names then become camunda-elasticsearch, camunda-orchestration, ...
+# Conventions (change in lock-step if customised):
+#   * Release name : camunda      Namespace : camunda
+#   * Service names then become camunda-elasticsearch, camunda-zeebe-gateway, ...
 #
-# IMPORTANT: the sidecar/init container `image:` below is a LITERAL (Helm does
-# not template values passed down to subcharts). Keep it in sync with
-# `vaultAgent.image`.
+# NOTE: the sidecar/init `image:` in the camunda-platform section below is a
+# LITERAL (Helm does not template values passed to subcharts). Keep it in sync
+# with vaultAgent.image.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Settings consumed by THIS umbrella chart's own templates
-# (ServiceAccount, RBAC, ConfigMaps, Vault bootstrap Job).
+# (per-app ServiceAccounts/RBAC, ConfigMaps, trusted-ca, Vault bootstrap Job).
 # -----------------------------------------------------------------------------
 vaultAgent:
-  # Container image for the agent (build from ./vault-sidecar and push to your
-  # private/air-gapped registry, e.g. icr.io/<namespace>/camunda-vault-agent).
+  # Build from ./vault-sidecar and push to your air-gapped registry.
   image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
   imagePullPolicy: IfNotPresent
 
-  serviceAccountName: camunda-vault-agent
-
-  # RBAC: the Role/RoleBinding grant create + get/update/patch on the single
-  # `camunda-credentials` Secret (needed for the Kubernetes-Secret delivery mode).
-  # Set create=false for a ZERO-RBAC posture: use the `files` mapping (shared
-  # volume) for delivery + restart.mode=signal (no API calls at all).
-  rbac:
-    create: true
-
-  # NetworkPolicy locks the dedicated bootstrap Job pod's egress down to just
-  # DNS + Vault + the Kubernetes API server. (Sidecars share the module pod's
-  # network, so restrict those at the module level if required.)
-  networkPolicy:
-    enabled: true
-    vaultPort: 8200
-    apiServerPort: 443
-    vaultCidr: ""   # optional CIDR for Vault; empty = any destination on vaultPort
+  intervalSeconds: 300            # how often each watch sidecar re-checks Vault
 
   vault:
     addr: "https://vault.vault.svc.cluster.local:8200"
     authPath: kubernetes          # Vault Kubernetes auth mount path
-    role: camunda                 # Vault role bound to the SA above
     namespace: ""                 # Vault Enterprise namespace (optional)
-    # Vault TLS: paste your Vault server's CA certificate (PEM) here to let the
-    # agent make verified HTTPS calls to Vault. Leave empty for a publicly-trusted
-    # CA (the alpine image ships ca-certificates) or set skipVerify for testing.
-    caCert: ""
+    # TLS to Vault is verified using the trusted-ca bundle below (OpenShift
+    # service-ca). Set skipVerify only for throwaway testing.
     skipVerify: false
 
-  intervalSeconds: 300            # how often the watch sidecar re-checks Vault
-  secretName: camunda-credentials
+  # OpenShift service-ca trust bundle. The `trusted-ca` ConfigMap is created
+  # empty with the inject annotation; OpenShift populates service-ca.crt. It is
+  # mounted into every agent container (and the app containers) so the JVM and
+  # curl trust in-cluster service-serving certificates (Vault, Elasticsearch,
+  # Keycloak, ...). On vanilla Kubernetes set openshiftInject=false and paste
+  # your own PEM bundle into caBundle.
+  trustedCa:
+    enabled: true
+    configMapName: trusted-ca
+    openshiftInject: true
+    caBundle: ""                  # used only when openshiftInject=false
 
-  restart:
-    mode: signal                  # signal | rollout | none
-    processMatch: java            # for signal mode (the Camunda JVM)
+  # The bootstrap Job seeds ALL secrets below (so datastores can boot) using a
+  # dedicated SA + a broad-read Vault role. It performs NO restarts.
+  bootstrap:
+    serviceAccountName: camunda-vault-bootstrap
+    vaultRole: camunda-bootstrap
 
-  # KV v2 read paths (note the `/data/` segment) -> Kubernetes Secret keys.
-  mappings:
-    - vaultPath: secret/data/camunda/elasticsearch
-      field: password
-      secretKey: elasticsearch-password
-    - vaultPath: secret/data/camunda/keycloak
-      field: admin-password
-      secretKey: identity-keycloak-admin-password
-    - vaultPath: secret/data/camunda/postgres/keycloak
-      field: admin-password
-      secretKey: identity-keycloak-postgresql-admin-password
-    - vaultPath: secret/data/camunda/postgres/keycloak
-      field: user-password
-      secretKey: identity-keycloak-postgresql-user-password
-    - vaultPath: secret/data/camunda/postgres/webmodeler
-      field: admin-password
-      secretKey: web-modeler-postgresql-admin-password
-    - vaultPath: secret/data/camunda/postgres/webmodeler
-      field: user-password
-      secretKey: web-modeler-postgresql-user-password
+  rbac:
+    create: true                  # create per-app Roles/RoleBindings
+
+  # NetworkPolicy locks the bootstrap Job pod's egress down to DNS + Vault + the
+  # Kubernetes API server. See docs/ARCHITECTURE.md for per-module alternatives.
+  networkPolicy:
+    enabled: true
+    vaultPort: 8200
+    apiServerPort: 443
+    vaultCidr: ""
+
+  # ---------------------------------------------------------------------------
+  # Secret targets. KV v2 read paths (note the `/data/` segment) -> per-app
+  # Kubernetes Secret. Targets WITH a `sidecar:` block also get a dedicated SA,
+  # Vault role and a watch sidecar that rollout-restarts only `workload`.
+  # Targets WITHOUT a sidecar are datastore secrets: created once by the
+  # bootstrap Job (rotation is a documented runbook, not a live restart).
+  # ---------------------------------------------------------------------------
+  targets:
+    # ---- datastore secrets (bootstrap-only, no sidecar) ----
+    - name: elasticsearch
+      secretName: camunda-elasticsearch-secret
+      mappings:
+        - { vaultPath: secret/data/camunda/elasticsearch, field: password, secretKey: elasticsearch-password }
+
+    - name: keycloak
+      secretName: camunda-keycloak-secret
+      mappings:
+        - { vaultPath: secret/data/camunda/keycloak, field: admin-password, secretKey: admin-password }
+
+    - name: keycloak-db
+      secretName: camunda-keycloak-db-secret
+      mappings:
+        - { vaultPath: secret/data/camunda/postgres/keycloak, field: admin-password, secretKey: admin-password }
+        - { vaultPath: secret/data/camunda/postgres/keycloak, field: user-password,  secretKey: user-password }
+
+    # ---- web-modeler: its restapi pod consumes this secret at runtime, so it
+    #      gets a sidecar + per-app SA that restarts only the restapi Deployment.
+    - name: web-modeler
+      secretName: camunda-web-modeler-db-secret
+      mappings:
+        - { vaultPath: secret/data/camunda/postgres/webmodeler, field: admin-password, secretKey: admin-password }
+        - { vaultPath: secret/data/camunda/postgres/webmodeler, field: user-password,  secretKey: user-password }
+      sidecar:
+        serviceAccountName: camunda-vault-web-modeler
+        vaultRole: camunda-web-modeler
+        workload: { kind: Deployment, name: camunda-web-modeler-restapi }
+
+    # ---- orchestration (Zeebe + Operate + Tasklist): reads the ES password ----
+    - name: orchestration
+      secretName: camunda-orchestration-secret
+      mappings:
+        - { vaultPath: secret/data/camunda/elasticsearch, field: password, secretKey: elasticsearch-password }
+      sidecar:
+        serviceAccountName: camunda-vault-orchestration
+        vaultRole: camunda-orchestration
+        workload: { kind: StatefulSet, name: camunda-zeebe }
+
+    # ---- optimize: reads the ES password ----
+    - name: optimize
+      secretName: camunda-optimize-secret
+      mappings:
+        - { vaultPath: secret/data/camunda/elasticsearch, field: password, secretKey: elasticsearch-password }
+      sidecar:
+        serviceAccountName: camunda-vault-optimize
+        vaultRole: camunda-optimize
+        workload: { kind: Deployment, name: camunda-optimize }
 
 # -----------------------------------------------------------------------------
 # HAProxy — single external entry point. All external traffic enters here and is
@@ -89,120 +133,28 @@ vaultAgent:
 # -----------------------------------------------------------------------------
 haproxy:
   enabled: true
-  # Keep host identical to camunda-platform.global.host above.
-  host: "camunda.example.com"
+  host: "camunda.example.com"           # keep identical to camunda-platform.global.host
   image: haproxytech/haproxy-alpine:3.0
   replicas: 2
   service:
-    type: LoadBalancer        # LoadBalancer (IKS) | NodePort | ClusterIP (+ Route on OpenShift)
-    httpPort: 80              # external HTTP port  -> container :8080
-    httpsPort: 443           # external HTTPS port -> container :8443 (when tls.enabled)
-    grpcPort: 26500          # external Zeebe gRPC -> container :26500
+    type: LoadBalancer        # LoadBalancer (IKS) | ClusterIP (+ OpenShift Route)
+    httpPort: 80
+    httpsPort: 443
+    grpcPort: 26500
     annotations: {}
-  # TLS termination at HAProxy. Default on with a self-signed cert; for production
-  # provide a real cert via existingSecret (a kubernetes.io/tls Secret) or cert-manager.
+  # TLS termination at HAProxy using an OpenShift service-serving-cert.
   tls:
     enabled: true
-    httpsPort: 443           # (kept for reference; service.httpsPort is authoritative)
-    redirectHttp: true       # 301 redirect http -> https
-    existingSecret: ""       # kubernetes.io/tls Secret (keys tls.crt, tls.key); empty => self-signed
-    selfSigned: true         # generate a self-signed cert when existingSecret is empty
+    redirectHttp: true        # 301 redirect http -> https
+    # OpenShift mints a kubernetes.io/tls secret for the HAProxy Service when
+    # openshiftServiceCA=true (via the serving-cert-secret-name annotation).
+    # On vanilla Kubernetes, set openshiftServiceCA=false and provide your own
+    # kubernetes.io/tls secret name in `secretName`.
+    openshiftServiceCA: true
+    secretName: camunda-haproxy-tls
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits: { cpu: "500m", memory: "256Mi" }
-
-# -----------------------------------------------------------------------------
-# YAML anchors: the agent init-containers / sidecar / volumes are identical for
-# every Camunda application module, so we define them once and reuse below.
-# (This top-level key is not a subchart; Helm simply ignores it.)
-# -----------------------------------------------------------------------------
-_vaultAgentTemplates:
-  # Shared pod volumes. No gencert/self-signed volume — TLS trust comes from the
-  # cluster-provided `trusted-ca` ConfigMap (key service-ca.crt -> tls-ca-bundle.pem).
-  volumes: &agentVolumes
-    - name: vault-agent-config
-      configMap:
-        name: camunda-vault-agent-config
-    - name: vault-shared
-      emptyDir: {}
-    - name: vault-tmp
-      emptyDir: {}
-    - name: trusted-ca
-      configMap:
-        name: trusted-ca
-        optional: true
-        items:
-          - key: service-ca.crt
-            path: tls-ca-bundle.pem
-  appMounts: &agentAppMounts
-    - name: trusted-ca
-      mountPath: /etc/pki/ca-trust/extracted/pem
-      readOnly: true
-
-  initContainers: &agentInit
-    # Fetch secrets from Vault and reconcile camunda-credentials before the app boots.
-    - name: vault-fetch
-      image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
-      imagePullPolicy: IfNotPresent
-      args: ["fetch"]
-      envFrom:
-        - configMapRef:
-            name: camunda-vault-agent-env
-      env:
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-      volumeMounts:
-        - name: vault-agent-config
-          mountPath: /etc/camunda-vault-agent
-          readOnly: true
-        - name: vault-shared
-          mountPath: /vault/secrets
-        - name: vault-tmp
-          mountPath: /tmp
-        - name: trusted-ca
-          mountPath: /etc/pki/ca-trust/extracted/pem
-          readOnly: true
-      securityContext: &agentSecCtx
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        runAsNonRoot: true
-        runAsUser: 1001
-        capabilities:
-          drop: ["ALL"]
-        seccompProfile:
-          type: RuntimeDefault
-
-  sidecars: &agentSidecar
-    # Watches Vault; on change updates camunda-credentials and restarts THIS module.
-    - name: vault-agent
-      image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
-      imagePullPolicy: IfNotPresent
-      args: ["watch"]
-      envFrom:
-        - configMapRef:
-            name: camunda-vault-agent-env
-      env:
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-      volumeMounts:
-        - name: vault-agent-config
-          mountPath: /etc/camunda-vault-agent
-          readOnly: true
-        - name: vault-shared
-          mountPath: /vault/secrets
-        - name: vault-tmp
-          mountPath: /tmp
-        - name: trusted-ca
-          mountPath: /etc/pki/ca-trust/extracted/pem
-          readOnly: true
-      resources:
-        requests: { cpu: "10m", memory: "32Mi" }
-        limits: { cpu: "100m", memory: "64Mi" }
-      securityContext: *agentSecCtx
 
 # =============================================================================
 # Camunda Platform subchart values
@@ -210,17 +162,13 @@ _vaultAgentTemplates:
 camunda-platform:
 
   global:
-    # External entry point: everything is reached through HAProxy on this host.
-    # Keep this value identical to `haproxy.host` below.
-    host: "camunda.example.com"
+    host: "camunda.example.com"   # keep identical to haproxy.host
     security:
       authentication:
         method: oidc
     identity:
       auth:
         enabled: true
-        # Browser-facing Keycloak issuer (through HAProxy /auth). Token validation
-        # still uses the in-cluster issuerBackendUrl (auto-derived).
         publicIssuerUrl: "https://camunda.example.com/auth/realms/camunda-platform"
         optimize:
           redirectUrl: "https://camunda.example.com/optimize"
@@ -230,51 +178,52 @@ camunda-platform:
           redirectUrl: "https://camunda.example.com/console"
 
   # ---------------------------------------------------------------------------
-  # Management Identity
+  # Management Identity — uses Keycloak via OIDC, no Vault-sourced runtime
+  # secret, so NO sidecar/SA is attached (least privilege).
   # ---------------------------------------------------------------------------
   identity:
     enabled: true
-    # Single-domain: served behind HAProxy at /identity
     contextPath: "/identity"
     fullURL: "https://camunda.example.com/identity"
-    serviceAccount:
-      enabled: false
-      name: camunda-vault-agent
-    initContainers: *agentInit
-    sidecars: *agentSidecar
-    extraVolumes: *agentVolumes
-    extraVolumeMounts: *agentAppMounts
+    extraVolumes:
+      - name: trusted-ca
+        configMap:
+          name: trusted-ca
+          optional: true
+          items:
+            - { key: service-ca.crt, path: tls-ca-bundle.pem }
+    extraVolumeMounts:
+      - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
 
   # ---------------------------------------------------------------------------
-  # Internal Keycloak (+ its embedded PostgreSQL).
-  # Passwords come from camunda-credentials (chart default existingSecret).
+  # Internal Keycloak (+ its embedded PostgreSQL). Secrets seeded by bootstrap.
   # ---------------------------------------------------------------------------
   identityKeycloak:
     enabled: true
     auth:
       adminUser: admin
-      existingSecret: camunda-credentials
-      passwordSecretKey: identity-keycloak-admin-password
+      existingSecret: camunda-keycloak-secret
+      passwordSecretKey: admin-password
     postgresql:
       auth:
-        existingSecret: camunda-credentials
+        existingSecret: camunda-keycloak-db-secret
         secretKeys:
-          adminPasswordKey: identity-keycloak-postgresql-admin-password
-          userPasswordKey: identity-keycloak-postgresql-user-password
+          adminPasswordKey: admin-password
+          userPasswordKey: user-password
 
-  # Identity uses Keycloak's database, so the standalone Identity Postgres is off.
   identityPostgresql:
     enabled: false
 
   # ---------------------------------------------------------------------------
   # Orchestration cluster (Zeebe broker/gateway + Operate + Tasklist).
-  # Secondary storage = Elasticsearch; ES password from camunda-credentials.
+  # Per-app SA + sidecar; ES password from its own secret.
+  # Rendered workload: StatefulSet camunda-zeebe.
   # ---------------------------------------------------------------------------
   orchestration:
     enabled: true
     serviceAccount:
       enabled: false
-      name: camunda-vault-agent
+      name: camunda-vault-orchestration
     replicas: 1
     clusterSize: "1"
     partitionCount: "1"
@@ -288,107 +237,228 @@ camunda-platform:
           auth:
             username: elastic
             secret:
-              existingSecret: camunda-credentials
+              existingSecret: camunda-orchestration-secret
               existingSecretKey: elasticsearch-password
-    initContainers: *agentInit
-    sidecars: *agentSidecar
-    extraVolumes: *agentVolumes
-    extraVolumeMounts: *agentAppMounts
+    initContainers:
+      - name: vault-fetch
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["fetch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        securityContext: &agentSecCtx
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+          capabilities: { drop: ["ALL"] }
+          seccompProfile: { type: RuntimeDefault }
+    sidecars:
+      - name: vault-agent
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["watch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+          - { name: RESTART_TARGET_KIND, value: StatefulSet }
+          - { name: RESTART_TARGET_NAME, value: camunda-zeebe }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        resources:
+          requests: { cpu: "10m", memory: "32Mi" }
+          limits: { cpu: "100m", memory: "64Mi" }
+        securityContext: *agentSecCtx
+    extraVolumes:
+      - { name: vault-agent-config, configMap: { name: camunda-vault-orchestration-config } }
+      - { name: vault-tmp, emptyDir: {} }
+      - name: trusted-ca
+        configMap:
+          name: trusted-ca
+          optional: true
+          items:
+            - { key: service-ca.crt, path: tls-ca-bundle.pem }
+    extraVolumeMounts:
+      - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
 
   # ---------------------------------------------------------------------------
-  # Connectors
+  # Connectors — talks to Zeebe; no Vault-sourced runtime secret -> no sidecar.
   # ---------------------------------------------------------------------------
   connectors:
     enabled: true
     contextPath: "/connectors"
-    serviceAccount:
-      enabled: false
-      name: camunda-vault-agent
     inbound:
       mode: credentials
-    initContainers: *agentInit
-    sidecars: *agentSidecar
-    extraVolumes: *agentVolumes
-    extraVolumeMounts: *agentAppMounts
+    extraVolumes:
+      - name: trusted-ca
+        configMap:
+          name: trusted-ca
+          optional: true
+          items:
+            - { key: service-ca.crt, path: tls-ca-bundle.pem }
+    extraVolumeMounts:
+      - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
 
   # ---------------------------------------------------------------------------
-  # Optimize (Elasticsearch password from camunda-credentials)
+  # Optimize — per-app SA + sidecar; ES password from its own secret.
+  # Rendered workload: Deployment camunda-optimize.
   # ---------------------------------------------------------------------------
   optimize:
     enabled: true
     contextPath: "/optimize"
     serviceAccount:
       enabled: false
-      name: camunda-vault-agent
+      name: camunda-vault-optimize
     database:
       elasticsearch:
         enabled: true
-        url:
-          protocol: http
-          host: camunda-elasticsearch
-          port: 9200
+        url: { protocol: http, host: camunda-elasticsearch, port: 9200 }
         auth:
           username: elastic
           secret:
-            existingSecret: camunda-credentials
+            existingSecret: camunda-optimize-secret
             existingSecretKey: elasticsearch-password
-    initContainers: *agentInit
-    sidecars: *agentSidecar
-    extraVolumes: *agentVolumes
-    extraVolumeMounts: *agentAppMounts
+    initContainers:
+      - name: vault-fetch
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["fetch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        securityContext: *agentSecCtx
+    sidecars:
+      - name: vault-agent
+        image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["watch"]
+        envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+        env:
+          - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+          - { name: RESTART_TARGET_KIND, value: Deployment }
+          - { name: RESTART_TARGET_NAME, value: camunda-optimize }
+        volumeMounts:
+          - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+          - { name: vault-tmp, mountPath: /tmp }
+          - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+        resources:
+          requests: { cpu: "10m", memory: "32Mi" }
+          limits: { cpu: "100m", memory: "64Mi" }
+        securityContext: *agentSecCtx
+    extraVolumes:
+      - { name: vault-agent-config, configMap: { name: camunda-vault-optimize-config } }
+      - { name: vault-tmp, emptyDir: {} }
+      - name: trusted-ca
+        configMap:
+          name: trusted-ca
+          optional: true
+          items:
+            - { key: service-ca.crt, path: tls-ca-bundle.pem }
+    extraVolumeMounts:
+      - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
 
   # ---------------------------------------------------------------------------
-  # Web Modeler (+ dedicated PostgreSQL; password from camunda-credentials)
+  # Web Modeler (+ dedicated PostgreSQL). The restapi consumes the DB password
+  # at runtime -> per-app SA + sidecar that restarts only the restapi Deployment.
   # ---------------------------------------------------------------------------
   webModeler:
     enabled: true
     contextPath: "/modeler"
+    serviceAccount:
+      enabled: false
+      name: camunda-vault-web-modeler
     restapi:
       mail:
         fromAddress: noreply@camunda.example.com
-      initContainers: *agentInit
-      sidecars: *agentSidecar
-      extraVolumes: *agentVolumes
-      extraVolumeMounts: *agentAppMounts
+      initContainers:
+        - name: vault-fetch
+          image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+          imagePullPolicy: IfNotPresent
+          args: ["fetch"]
+          envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+          env:
+            - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+          volumeMounts:
+            - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+            - { name: vault-tmp, mountPath: /tmp }
+            - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+          securityContext: *agentSecCtx
+      sidecars:
+        - name: vault-agent
+          image: icr.io/camunda-airgap/camunda-vault-agent:1.0.0
+          imagePullPolicy: IfNotPresent
+          args: ["watch"]
+          envFrom: [{ configMapRef: { name: camunda-vault-agent-env } }]
+          env:
+            - { name: POD_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+            - { name: RESTART_TARGET_KIND, value: Deployment }
+            - { name: RESTART_TARGET_NAME, value: camunda-web-modeler-restapi }
+          volumeMounts:
+            - { name: vault-agent-config, mountPath: /etc/camunda-vault-agent, readOnly: true }
+            - { name: vault-tmp, mountPath: /tmp }
+            - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
+          resources:
+            requests: { cpu: "10m", memory: "32Mi" }
+            limits: { cpu: "100m", memory: "64Mi" }
+          securityContext: *agentSecCtx
+      extraVolumes:
+        - { name: vault-agent-config, configMap: { name: camunda-vault-web-modeler-config } }
+        - { name: vault-tmp, emptyDir: {} }
+        - name: trusted-ca
+          configMap:
+            name: trusted-ca
+            optional: true
+            items:
+              - { key: service-ca.crt, path: tls-ca-bundle.pem }
+      extraVolumeMounts:
+        - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
 
   webModelerPostgresql:
     enabled: true
     auth:
-      existingSecret: camunda-credentials
+      existingSecret: camunda-web-modeler-db-secret
       secretKeys:
-        adminPasswordKey: web-modeler-postgresql-admin-password
-        userPasswordKey: web-modeler-postgresql-user-password
+        adminPasswordKey: admin-password
+        userPasswordKey: user-password
 
   # ---------------------------------------------------------------------------
-  # Console
+  # Console — no Vault-sourced runtime secret -> no sidecar.
   # ---------------------------------------------------------------------------
   console:
     enabled: true
     contextPath: "/console"
-    serviceAccount:
-      enabled: false
-      name: camunda-vault-agent
-    initContainers: *agentInit
-    sidecars: *agentSidecar
-    extraVolumes: *agentVolumes
-    extraVolumeMounts: *agentAppMounts
+    extraVolumes:
+      - name: trusted-ca
+        configMap:
+          name: trusted-ca
+          optional: true
+          items:
+            - { key: service-ca.crt, path: tls-ca-bundle.pem }
+    extraVolumeMounts:
+      - { name: trusted-ca, mountPath: /etc/pki/ca-trust/extracted/pem, readOnly: true }
 
   # ---------------------------------------------------------------------------
-  # Bundled Elasticsearch (single node) with X-Pack security enabled.
-  # The `elastic` user password is taken from camunda-credentials
-  # (bitnami expects the key `elasticsearch-password`).
+  # Bundled Elasticsearch (single node) with X-Pack security. The `elastic`
+  # password is seeded by the bootstrap Job into camunda-elasticsearch-secret.
   # ---------------------------------------------------------------------------
   elasticsearch:
     enabled: true
     security:
       enabled: true
-      existingSecret: camunda-credentials
+      existingSecret: camunda-elasticsearch-secret
       tls:
-        # Internal cluster traffic only: REST API stays HTTP + basic-auth so the
-        # `elastic` password (from Vault) is all that's needed by clients.
         restEncryption: false
-        # Bitnami requires TLS material for the transport layer when X-Pack
-        # security is enabled; auto-generate it (node-to-node only).
         autoGenerated: true
     master:
       masterOnly: false
@@ -399,7 +469,5 @@ camunda-platform:
       replicaCount: 0
     ingest:
       replicaCount: 0
-    # Avoid the privileged sysctl init container (air-gap / restricted policy).
-    # Ensure nodes have vm.max_map_count=262144 (see docs/IBM-Cloud-deploy.md).
     sysctlImage:
       enabled: false

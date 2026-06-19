@@ -1,0 +1,37 @@
+{{- $tc := .Values.vaultAgent.trustedCa -}}
+{{- if $tc.enabled }}
+{{/*
+trusted-ca ConfigMap: the cluster CA bundle used by every agent container (curl
+-> Vault) and every Camunda app container (JVM -> Elasticsearch/Keycloak/Vault).
+
+  * OpenShift / ROKS (openshiftInject=true): created EMPTY with the
+    `service.beta.openshift.io/inject-cabundle` annotation; the OpenShift
+    service-ca operator populates the `service-ca.crt` key automatically.
+  * Vanilla Kubernetes (openshiftInject=false): paste your PEM bundle into
+    vaultAgent.trustedCa.caBundle; it is written to the `service-ca.crt` key.
+
+Installed as a pre-install/pre-upgrade hook so it exists (and is injected)
+before the bootstrap Job runs. The Job retries (backoffLimit) to absorb the
+brief window before the service-ca operator injects the bundle.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $tc.configMapName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-18"
+    helm.sh/hook-delete-policy: before-hook-creation
+    {{- if $tc.openshiftInject }}
+    service.beta.openshift.io/inject-cabundle: "true"
+    {{- end }}
+{{- if and (not $tc.openshiftInject) $tc.caBundle }}
+data:
+  service-ca.crt: |
+    {{- $tc.caBundle | nindent 4 }}
+{{- end }}
+{{- end }}
