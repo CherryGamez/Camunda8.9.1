@@ -18,6 +18,10 @@ deliverables/
 │   ├── Dockerfile                 #   minimal alpine image, non-root
 │   ├── config.example.json
 │   └── build-and-push.sh
+├── haproxy/                       # Standalone HAProxy config (chart renders the same)
+│   ├── haproxy.cfg                #   plain config (haproxy -c validated)
+│   ├── haproxy-standalone.yaml    #   ConfigMap + Service + Deployment
+│   └── README.md
 ├── vault/                         # Vault configuration
 │   ├── policy-camunda.hcl         #   broad-read policy (bootstrap role)
 │   └── setup-vault.sh             #   KV + k8s auth + per-app roles/policies + seed
