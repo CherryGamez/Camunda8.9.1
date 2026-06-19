@@ -36,7 +36,10 @@ TLS.
   rollout target.
   - Sidecar apps: **orchestration** (StatefulSet `camunda-zeebe`), **optimize**
     (Deployment `camunda-optimize`), **web-modeler** (Deployment
-    `camunda-web-modeler-restapi`).
+    `camunda-web-modeler-restapi`). The Vault sidecar shares the app's OWN
+    (chart-owned) ServiceAccount with the main container; scoped Role/RoleBinding
+    + Vault auth role are attached to that SA (no separate vault SA). Bootstrap
+    Job keeps its own dedicated SA `camunda-vault-bootstrap`.
   - Datastore-only secrets (bootstrap-seeded, no sidecar): elasticsearch,
     keycloak (admin), keycloak-db, web-modeler-db.
   - Identity / Connectors / Console: **no sidecar** (OIDC, no Vault DB secret).

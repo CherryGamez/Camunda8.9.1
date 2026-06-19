@@ -28,15 +28,22 @@ and deployed via **ArgoCD** (manifests rendered in GitLab CI).
 
 ## Per-app secret model (Msg 309)
 
-Each **app that consumes a Vault-sourced secret at runtime** gets full isolation:
-its own **ServiceAccount**, its own **Vault role+policy**, its own **Kubernetes
-Secret**, and a **watch sidecar** that rollout-restarts **only that workload**.
+Each **app that consumes a Vault-sourced secret at runtime** gets full isolation.
+The Vault sidecar runs in the **same pod as the main container and therefore uses
+the same ServiceAccount** — the app's own (chart-owned) SA. We do **not** create a
+separate SA for the agent; we attach a scoped Role + RoleBinding to the app SA and
+bind the Vault auth role to it. Each app also has its own Vault policy and its own
+Kubernetes Secret, and a watch sidecar that rollout-restarts **only that workload**.
 
-| App | SA | Vault role/policy (read) | Secret | Restarts (rollout) |
+| App | ServiceAccount (shared by main container + sidecar) | Vault role/policy (read) | Secret | Restarts (rollout) |
 |---|---|---|---|---|
-| Orchestration | `camunda-vault-orchestration` | `camunda/elasticsearch` | `camunda-orchestration-secret` | `StatefulSet/camunda-zeebe` |
-| Optimize | `camunda-vault-optimize` | `camunda/elasticsearch` | `camunda-optimize-secret` | `Deployment/camunda-optimize` |
-| Web Modeler | `camunda-vault-web-modeler` | `camunda/postgres/webmodeler` | `camunda-web-modeler-db-secret` | `Deployment/camunda-web-modeler-restapi` |
+| Orchestration | `camunda-orchestration` | `camunda/elasticsearch` | `camunda-orchestration-secret` | `StatefulSet/camunda-zeebe` |
+| Optimize | `camunda-optimize` | `camunda/elasticsearch` | `camunda-optimize-secret` | `Deployment/camunda-optimize` |
+| Web Modeler | `camunda-web-modeler` | `camunda/postgres/webmodeler` | `camunda-web-modeler-db-secret` | `Deployment/camunda-web-modeler-restapi` |
+
+The **bootstrap Job** has no app/main container, so it keeps its **own dedicated**
+ServiceAccount `camunda-vault-bootstrap` (broad-read Vault role, may create/patch
+all the named secrets, performs no restarts).
 
 **Datastore secrets** (no sidecar) are seeded once by the bootstrap Job and
 consumed natively via `existingSecret`:

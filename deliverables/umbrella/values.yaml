@@ -80,7 +80,7 @@ vaultAgent:
         - { vaultPath: secret/data/camunda/postgres/webmodeler, field: admin-password, secretKey: admin-password }
         - { vaultPath: secret/data/camunda/postgres/webmodeler, field: user-password,  secretKey: user-password }
       sidecar:
-        serviceAccountName: camunda-vault-web-modeler
+        serviceAccountName: camunda-web-modeler
         vaultRole: camunda-web-modeler
         workload: { kind: Deployment, name: camunda-web-modeler-restapi }
     - name: orchestration
@@ -88,7 +88,7 @@ vaultAgent:
       mappings:
         - { vaultPath: secret/data/camunda/elasticsearch, field: password, secretKey: elasticsearch-password }
       sidecar:
-        serviceAccountName: camunda-vault-orchestration
+        serviceAccountName: camunda-orchestration
         vaultRole: camunda-orchestration
         workload: { kind: StatefulSet, name: camunda-zeebe }
     - name: optimize
@@ -96,7 +96,7 @@ vaultAgent:
       mappings:
         - { vaultPath: secret/data/camunda/elasticsearch, field: password, secretKey: elasticsearch-password }
       sidecar:
-        serviceAccountName: camunda-vault-optimize
+        serviceAccountName: camunda-optimize
         vaultRole: camunda-optimize
         workload: { kind: Deployment, name: camunda-optimize }
 
@@ -263,9 +263,11 @@ camunda-platform:
   # ---------------------------------------------------------------------------
   orchestration:
     enabled: true
+    # The Vault sidecar shares this pod SA (the chart-owned app SA); we attach
+    # the Vault Role/RoleBinding + Vault auth role to it (see templates/vault-rbac.yaml).
     serviceAccount:
-      enabled: false
-      name: camunda-vault-orchestration
+      enabled: true
+      name: camunda-orchestration
     # --- cluster topology (single node by default; use 3/3/3 for production HA) ---
     replicas: 1
     clusterSize: "1"
@@ -378,8 +380,8 @@ camunda-platform:
     enabled: true
     contextPath: "/optimize"
     serviceAccount:
-      enabled: false
-      name: camunda-vault-optimize
+      enabled: true
+      name: camunda-optimize
     resources:
       requests: { cpu: "600m", memory: "1Gi" }
       limits: { cpu: "2000m", memory: "2Gi" }
@@ -445,8 +447,8 @@ camunda-platform:
     enabled: true
     contextPath: "/modeler"
     serviceAccount:
-      enabled: false
-      name: camunda-vault-web-modeler
+      enabled: true
+      name: camunda-web-modeler
     restapi:
       replicas: 1
       resources:

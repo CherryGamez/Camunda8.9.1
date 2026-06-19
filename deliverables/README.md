@@ -37,7 +37,7 @@ deliverables/
 |---|---|
 | Umbrella `values.yaml`, **all modules working & talking to each other** | Orchestration (Zeebe+Operate+Tasklist), Identity, **Keycloak**, Connectors, Optimize, Web Modeler, Console, Elasticsearch, 2× PostgreSQL — all enabled, OIDC via Keycloak. |
 | **Postgres & ES passwords from Vault, dynamic** | The agent reads them from Vault (KV v2) and reconciles **per-app** Kubernetes Secrets each component references via `existingSecret`. |
-| **Fetch secrets using the ServiceAccount name (k8s auth)** | Each app has its **own** SA + **own** Vault role/policy; the pod SA JWT is exchanged for a short-lived Vault token scoped to that app's paths only. |
+| **Fetch secrets using the ServiceAccount name (k8s auth)** | The Vault sidecar shares the **app's own ServiceAccount** (same pod, same SA as the main container); that SA's JWT is exchanged for a short-lived Vault token scoped (per-app Vault role/policy) to that app's paths only. |
 | **Sidecar restarts the attached module** | `RESTART_MODE=rollout`: each sidecar patches **only its own** Deployment/StatefulSet (RBAC scoped to that one workload). |
 | **Enterprise PKI / no self-signed certs** | Trust comes from the OpenShift **service-ca** via the `trusted-ca` ConfigMap (`service-ca.crt` → `tls-ca-bundle.pem`); HAProxy uses a service-serving-cert. |
 | **Minimal rights / air-gapped** | Per-app RBAC = create + get/update/patch on **its own** Secret + get/patch on **its own** workload. No Vault Injector, no webhooks, no client-go. Non-root, read-only rootfs, all caps dropped. |

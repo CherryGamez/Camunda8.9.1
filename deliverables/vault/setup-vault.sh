@@ -8,9 +8,9 @@
 #   3. ONE read-only policy + role PER app, each scoped to only that app's paths
 #      and bound to only that app's ServiceAccount:
 #        camunda-bootstrap     SA camunda-vault-bootstrap     read camunda/*
-#        camunda-orchestration SA camunda-vault-orchestration read camunda/elasticsearch
-#        camunda-optimize      SA camunda-vault-optimize      read camunda/elasticsearch
-#        camunda-web-modeler   SA camunda-vault-web-modeler   read camunda/postgres/webmodeler
+#        camunda-orchestration SA camunda-orchestration       read camunda/elasticsearch
+#        camunda-optimize      SA camunda-optimize            read camunda/elasticsearch
+#        camunda-web-modeler   SA camunda-web-modeler         read camunda/postgres/webmodeler
 #   4. Seed random PostgreSQL / Keycloak / Elasticsearch passwords (idempotent)
 #
 # Requires: vault CLI, and VAULT_ADDR + a privileged VAULT_TOKEN exported.
@@ -67,11 +67,11 @@ write_policy camunda-orchestration "camunda/elasticsearch"
 write_policy camunda-optimize      "camunda/elasticsearch"
 write_policy camunda-web-modeler   "camunda/postgres/webmodeler"
 
-echo ">> [4/5] Create per-app roles bound to each ServiceAccount"
-write_role camunda-bootstrap     camunda-vault-bootstrap     camunda-bootstrap
-write_role camunda-orchestration camunda-vault-orchestration camunda-orchestration
-write_role camunda-optimize      camunda-vault-optimize      camunda-optimize
-write_role camunda-web-modeler   camunda-vault-web-modeler   camunda-web-modeler
+echo ">> [4/5] Create per-app roles bound to each app's own ServiceAccount"
+write_role camunda-bootstrap     camunda-vault-bootstrap camunda-bootstrap
+write_role camunda-orchestration camunda-orchestration   camunda-orchestration
+write_role camunda-optimize      camunda-optimize        camunda-optimize
+write_role camunda-web-modeler   camunda-web-modeler     camunda-web-modeler
 
 echo ">> [5/5] Seed secrets (only writes a key if it does not already exist)"
 seed() {

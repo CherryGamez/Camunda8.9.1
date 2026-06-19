@@ -1,16 +1,20 @@
 {{- $va := .Values.vaultAgent -}}
 {{/*
-Per-app, least-privilege RBAC for the Vault agent.
+Least-privilege RBAC for the Vault agent.
 
-  * Each sidecar-enabled app gets its OWN ServiceAccount + Role + RoleBinding.
-    The Role allows: create Secrets (cannot be name-restricted), get/update/patch
-    ONLY that app's Secret, and get/patch ONLY that app's own workload (for the
-    rollout restart). Nothing else.
-  * The bootstrap Job gets a separate ServiceAccount that may create + get/
-    update/patch ONLY the named secrets it seeds. It performs no restarts.
+  * Each sidecar-enabled app REUSES its own (chart-owned) ServiceAccount — the
+    same one the main container runs under. We do NOT create a separate SA; we
+    only attach a Role + RoleBinding to it. The Role allows: create Secrets
+    (cannot be name-restricted), get/update/patch ONLY that app's Secret, and
+    get/patch ONLY that app's own workload (for the rollout restart).
+  * The bootstrap Job has no app/main container, so it gets its OWN dedicated
+    ServiceAccount that may create + get/update/patch ONLY the named secrets it
+    seeds. It performs no restarts.
 
-All are pre-install/pre-upgrade hooks so they exist before the bootstrap Job
-and persist for the lifetime of the release (module pods reference them by name).
+The bootstrap SA/RBAC are pre-install/pre-upgrade hooks (needed before the
+bootstrap Job). The per-app Role/RoleBinding are normal resources that pair with
+the chart-created app ServiceAccounts (Helm/ArgoCD apply SA+Role+RoleBinding
+before the workloads).
 */}}
 {{/* ----------------------- bootstrap ServiceAccount + RBAC ----------------------- */}}
 apiVersion: v1
@@ -66,34 +70,20 @@ subjects:
     name: {{ $va.bootstrap.serviceAccountName }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
-{{/* ----------------------- per-app ServiceAccounts + RBAC ----------------------- */}}
+{{/* ------------ per-app Role + RoleBinding (attached to the app's own SA) ------------ */}}
 {{- range $va.targets }}
 {{- if .sidecar }}
 {{- $wlres := ternary "statefulsets" "deployments" (eq .sidecar.workload.kind "StatefulSet") }}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ .sidecar.serviceAccountName }}
-  namespace: {{ $.Release.Namespace }}
-  labels:
-    app.kubernetes.io/part-of: camunda-platform
-    app.kubernetes.io/component: vault-agent
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-20"
-    helm.sh/hook-delete-policy: before-hook-creation
 {{- if $va.rbac.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ .sidecar.serviceAccountName }}
+  name: camunda-vault-{{ .name }}
   namespace: {{ $.Release.Namespace }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-15"
-    helm.sh/hook-delete-policy: before-hook-creation
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
 rules:
   # Create the per-app secret the first time (create cannot be name-scoped).
   - apiGroups: [""]
@@ -113,17 +103,18 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ .sidecar.serviceAccountName }}
+  name: camunda-vault-{{ .name }}
   namespace: {{ $.Release.Namespace }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-14"
-    helm.sh/hook-delete-policy: before-hook-creation
+  labels:
+    app.kubernetes.io/part-of: camunda-platform
+    app.kubernetes.io/component: vault-agent
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ .sidecar.serviceAccountName }}
+  name: camunda-vault-{{ .name }}
 subjects:
+  # The app's own (chart-owned) ServiceAccount — shared by the main container
+  # and the Vault sidecar.
   - kind: ServiceAccount
     name: {{ .sidecar.serviceAccountName }}
     namespace: {{ $.Release.Namespace }}
