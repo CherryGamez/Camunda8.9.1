@@ -63,13 +63,19 @@ See **docs/IBM-Cloud-deploy.md** for the full IKS / OpenShift walkthrough and
 **docs/ARCHITECTURE.md** for the design and the secret flow.
 
 ## Verified in this delivery
-- `helm dependency build`, `helm lint`, `helm template` (62 manifests render cleanly).
-- The agent (`gencert`, `fetch`, change-detection, rotation) tested against a **live Vault dev server**.
-- Post-render correctly injects `shareProcessNamespace: true` into all 6 Camunda modules.
-- All component Secret references resolve to `camunda-credentials` with the correct keys.
+- `helm dependency build`, `helm lint`, `helm template` (full stack renders cleanly).
+- **Live integration test against a REAL Kubernetes API server (k3s control-plane) + REAL Vault:**
+  - Vault **Kubernetes auth** — agent SA JWT validated via real TokenReview → Vault token.
+  - Agent **created** `camunda-credentials` in the live API server (6 keys, values matching Vault).
+  - **Idempotent** re-run (no-op), **rotation** (patches only the changed key), **rollout-restart** (real Deployment pod-template annotation patched).
+  - **Least-privilege RBAC enforced by the apiserver**: create + get own secret only — `kubectl auth can-i` denies delete/list/other secrets/pods.
+  - All **66 rendered manifests pass `kubectl apply --dry-run=server`** (real schema/admission validation).
+  - HTTPS to Vault validated against a TLS Vault (custom CA, clean fatal on TLS error, skip-verify).
+  - `haproxy -c` validates the generated HAProxy config (incl. the TLS bind).
+- A real latent bug was found by the live test (shell subshell var scope on the k8s path) and fixed.
 
-## Not verified here (needs your cluster)
-A full end-to-end boot of Camunda requires a real Kubernetes cluster + Vault +
-your registry, which is out of scope of this build environment. The Kubernetes
-Secret write/patch and `rollout`/`signal` restart paths are implemented to spec
-but should be smoke-tested on a non-prod cluster first (see IBM-Cloud-deploy.md).
+## Not verified here (needs a bigger cluster)
+The sandbox is capped at **2 GB RAM** and the **kubelet is blocked** (no `/dev/kmsg`
+device access), so the heavy Camunda **Java pods cannot boot here** (they need
+~8–16 GB + a kubelet). The control-plane test above covers the Vault/sidecar/RBAC
+integration; boot the full stack on your IBM Cloud cluster per docs/IBM-Cloud-deploy.md.

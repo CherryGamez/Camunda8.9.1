@@ -31,20 +31,20 @@ functionality, fetch secrets for the module and restart it.
 - Restart: signal mode via `shareProcessNamespace` injected by post-render kustomize.
 - RBAC: create + get/update/patch on the single `camunda-credentials` secret. No more.
 
-## Status — implemented & verified (2026-06-18)
-- HAProxy single entry point with **built-in TLS termination** (:8443, Service
-  443→8443, HTTP→HTTPS 301 redirect). Cert via self-signed init (camunda-vault-agent
-  gencert) by default, or `kubernetes.io/tls` `existingSecret`. All external URLs
-  flipped to https. `haproxy -c` validates the TLS config; gRPC :26500 plaintext.
-- Path-prefix routing to all modules + per-module contextPaths + OIDC
-  publicIssuerUrl/redirectUrls on global.host. Internal module-to-module comms via
-  cluster DNS (default).
-- `helm lint`/`template` clean for TLS on/off/existingSecret. Post-render injects
-  shareProcessNamespace into the 6 modules.
-- Vault agent verified against live TLS Vault (HTTPS w/ CA, clean fatal on TLS
-  failure, skip-verify, KV v2 read, create/patch, idempotency, rotation); gencert ok.
-- Security toggles: vaultAgent.rbac.create (zero-RBAC), networkPolicy (bootstrap
-  egress = DNS+Vault+API), vault.caCert (HTTPS CA in every agent container).
+## Status — implemented & verified (2026-06-18 / live-tested 2026-06-19)
+- **LIVE integration test on a real Kubernetes API server (k3s control-plane) + real Vault:**
+  Vault Kubernetes-auth (SA JWT → real TokenReview), agent created camunda-credentials
+  (6 keys = Vault values), idempotent re-run, rotation (single-key patch), rollout-restart
+  (real Deployment annotation), least-privilege RBAC enforced by apiserver (can-i: create+get-own
+  only). All 66 rendered manifests pass `kubectl apply --dry-run=server`.
+- A real latent bug (K_CODE subshell scope on the k8s path) was found by the live test and fixed.
+- HAProxy single entry point + built-in TLS (8443, 443→8443, http→https redirect, self-signed
+  init or kubernetes.io/tls existingSecret); `haproxy -c` validates incl. TLS bind. gRPC 26500.
+- Path-prefix routing + per-module contextPaths + OIDC publicIssuerUrl/redirectUrls (https).
+- Vault agent also verified against a live TLS Vault (HTTPS w/ CA, clean fatal, skip-verify).
+- Security toggles: rbac.create (zero-RBAC), networkPolicy (bootstrap egress DNS+Vault+API),
+  vault.caCert (HTTPS CA in every agent container).
+- NOT verifiable here: full Camunda Java pods (sandbox = 2 GB RAM + kubelet blocked / no /dev/kmsg).
 
 ## NOT verified here (needs a real cluster)
 - Full Camunda end-to-end boot on IBM Cloud (no cluster/Vault/registry in build env).

@@ -115,18 +115,18 @@ resolve_namespace() {
   return 1
 }
 
-# k_api <method> <path> [body] [content-type]; body->/tmp/k_resp, code->$K_CODE. Returns non-zero on transport error.
+# k_api <method> <path> [body] [content-type]; prints HTTP code to stdout, body to /tmp/k_resp. Returns non-zero on transport error.
 k_api() {
   _m="$1"; _path="$2"; _body="${3:-}"; _ct="${4:-application/json}"
   if [ -n "$_body" ]; then
-    K_CODE="$(curl -sS --cacert "$KSA_DIR/ca.crt" -H "Authorization: Bearer $(k_token)" \
+    code="$(curl -sS --cacert "$KSA_DIR/ca.crt" -H "Authorization: Bearer $(k_token)" \
       -o /tmp/k_resp -w '%{http_code}' -X "$_m" -H "Content-Type: $_ct" \
       -d "$_body" "$APISERVER$_path" 2>/tmp/cva_err)" || { log "ERROR: kube API transport error: $(cat /tmp/cva_err 2>/dev/null)"; return 1; }
   else
-    K_CODE="$(curl -sS --cacert "$KSA_DIR/ca.crt" -H "Authorization: Bearer $(k_token)" \
+    code="$(curl -sS --cacert "$KSA_DIR/ca.crt" -H "Authorization: Bearer $(k_token)" \
       -o /tmp/k_resp -w '%{http_code}' -X "$_m" "$APISERVER$_path" 2>/tmp/cva_err)" || { log "ERROR: kube API transport error: $(cat /tmp/cva_err 2>/dev/null)"; return 1; }
   fi
-  cat /tmp/k_resp
+  printf '%s' "$code"
 }
 
 # ---------------------------------------------------------------------------
@@ -177,24 +177,25 @@ fetch_once() {
       i=$((i+1))
     done
 
-    body="$(k_api GET "/api/v1/namespaces/$ns/secrets/$secret_name")" || return 1
-    if [ "$K_CODE" = "404" ]; then
+    code="$(k_api GET "/api/v1/namespaces/$ns/secrets/$secret_name")" || return 1
+    body="$(cat /tmp/k_resp)"
+    if [ "$code" = "404" ]; then
       payload="$(jq -nc --arg name "$secret_name" --argjson data "$desired" \
         '{apiVersion:"v1",kind:"Secret",metadata:{name:$name,labels:{"app.kubernetes.io/managed-by":"camunda-vault-agent"}},type:"Opaque",data:$data}')"
-      out="$(k_api POST "/api/v1/namespaces/$ns/secrets" "$payload")" || return 1
-      [ "$K_CODE" = "201" ] || { log "ERROR: create secret failed ($K_CODE): $out"; return 1; }
+      code="$(k_api POST "/api/v1/namespaces/$ns/secrets" "$payload")" || return 1
+      [ "$code" = "201" ] || { log "ERROR: create secret failed ($code): $(cat /tmp/k_resp)"; return 1; }
       log "created secret $ns/$secret_name with $entries_n keys"; CHANGED=1
-    elif [ "$K_CODE" = "200" ]; then
+    elif [ "$code" = "200" ]; then
       diff="$(printf '%s' "$body" | jq -c --argjson d "$desired" '
         (.data // {}) as $cur | reduce ($d|to_entries[]) as $e ({}; if $cur[$e.key] == $e.value then . else . + {($e.key):$e.value} end)')"
       if [ "$(printf '%s' "$diff" | jq 'length')" -gt 0 ]; then
         patch="$(jq -nc --argjson data "$diff" '{data:$data}')"
-        out="$(k_api PATCH "/api/v1/namespaces/$ns/secrets/$secret_name" "$patch" "application/merge-patch+json")" || return 1
-        [ "$K_CODE" = "200" ] || { log "ERROR: patch secret failed ($K_CODE): $out"; return 1; }
+        code="$(k_api PATCH "/api/v1/namespaces/$ns/secrets/$secret_name" "$patch" "application/merge-patch+json")" || return 1
+        [ "$code" = "200" ] || { log "ERROR: patch secret failed ($code): $(cat /tmp/k_resp)"; return 1; }
         log "updated $(printf '%s' "$diff" | jq 'length') key(s) in secret $ns/$secret_name"; CHANGED=1
       fi
     else
-      log "ERROR: get secret failed ($K_CODE): $body"; return 1
+      log "ERROR: get secret failed ($code): $body"; return 1
     fi
   fi
   return 0
@@ -231,8 +232,8 @@ restart_module() {
       esac
       ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       patch="$(jq -nc --arg ts "$ts" '{spec:{template:{metadata:{annotations:{"camunda-vault-agent/restartedAt":$ts}}}}}')"
-      out="$(k_api PATCH "/apis/apps/v1/namespaces/$ns/$res/$RESTART_TARGET_NAME" "$patch" "application/strategic-merge-patch+json")" || return 1
-      [ "$K_CODE" = "200" ] || { log "ERROR: rollout restart failed ($K_CODE): $out"; return 1; }
+      code="$(k_api PATCH "/apis/apps/v1/namespaces/$ns/$res/$RESTART_TARGET_NAME" "$patch" "application/strategic-merge-patch+json")" || return 1
+      [ "$code" = "200" ] || { log "ERROR: rollout restart failed ($code): $(cat /tmp/k_resp)"; return 1; }
       log "triggered rollout restart of $RESTART_TARGET_KIND/$RESTART_TARGET_NAME" ;;
     *)
       log "ERROR: unknown RESTART_MODE '$RESTART_MODE'"; return 1 ;;
