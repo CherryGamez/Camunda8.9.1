@@ -37,7 +37,7 @@ deliverables/
 | **Sidecar restarts the attached module** | `RESTART_MODE=rollout`: each sidecar patches **only its own** Deployment/StatefulSet (RBAC scoped to that one workload). |
 | **Enterprise PKI / no self-signed certs** | Trust comes from the OpenShift **service-ca** via the `trusted-ca` ConfigMap (`service-ca.crt` → `tls-ca-bundle.pem`); HAProxy uses a service-serving-cert. |
 | **Minimal rights / air-gapped** | Per-app RBAC = create + get/update/patch on **its own** Secret + get/patch on **its own** workload. No Vault Injector, no webhooks, no client-go. Non-root, read-only rootfs, all caps dropped. |
-| **Single external entry point via HAProxy** | One HAProxy Service fronts everything by path prefix + proxies Zeebe gRPC; TLS via service-ca. See **docs/HAPROXY.md**. |
+| **Single external entry point via HAProxy** | One HAProxy Service fronts everything by path prefix + proxies Zeebe gRPC; TLS via service-ca. A dedicated **monitoring port (9090)** exposes each app's `/actuator/health` + `/actuator/prometheus`. See **docs/HAPROXY.md**. |
 | **ArgoCD-native delivery** | Point an ArgoCD Application at this Helm chart (`source.helm`); ArgoCD runs `helm template` and **natively converts the install hooks** (pre-install → PreSync), so SA/RBAC/ConfigMaps/`trusted-ca` and the bootstrap Job run before the datastores/apps. **No GitLab CI / Helm post-renderer needed.** |
 
 ## TL;DR deploy (release `camunda`, namespace `camunda`)

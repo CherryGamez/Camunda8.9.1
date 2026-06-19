@@ -109,6 +109,67 @@ data:
       option tcplog
       balance roundrobin
       server s1 {{ $r }}-zeebe-gateway:26500 check resolvers kube-dns init-addr none
+{{- if $h.monitoring.enabled }}
+
+    # ---- Monitoring / management entry point (Spring Boot actuator) ----
+    # Each app's management port is reached under a per-app path prefix; the
+    # prefix is stripped so the backend sees the native /actuator/... path.
+    #   GET :{{ $h.monitoring.port }}/orchestration/actuator/health
+    #   GET :{{ $h.monitoring.port }}/orchestration/actuator/prometheus
+    #   GET :{{ $h.monitoring.port }}/optimize/actuator/prometheus      (port 8092)
+    #   GET :{{ $h.monitoring.port }}/identity/actuator/prometheus      (port 82)
+    #   GET :{{ $h.monitoring.port }}/console/actuator/health           (port 9100)
+    #   GET :{{ $h.monitoring.port }}/web-modeler/actuator/health       (port 8091)
+    #   GET :{{ $h.monitoring.port }}/connectors/actuator/prometheus    (port 8080)
+    # SECURITY: actuator can expose runtime info — restrict reachability via
+    # monitoring.allowedCidrs and/or a NetworkPolicy so only Prometheus can scrape.
+    frontend monitoring_in
+      bind *:9090
+      mode http
+      option httplog
+{{- if $h.monitoring.allowedCidrs }}
+      acl mon_allowed src{{ range $h.monitoring.allowedCidrs }} {{ . }}{{ end }}
+      http-request deny unless mon_allowed
+{{- end }}
+      http-request return status 200 content-type text/plain string "ok" if { path /healthz }
+
+      acl m_orch        path_beg /orchestration
+      acl m_optimize    path_beg /optimize
+      acl m_identity    path_beg /identity
+      acl m_console     path_beg /console
+      acl m_modeler     path_beg /web-modeler
+      acl m_connectors  path_beg /connectors
+
+      http-request set-path %[path,regsub(^/orchestration,)] if m_orch
+      http-request set-path %[path,regsub(^/optimize,)]      if m_optimize
+      http-request set-path %[path,regsub(^/identity,)]      if m_identity
+      http-request set-path %[path,regsub(^/console,)]       if m_console
+      http-request set-path %[path,regsub(^/web-modeler,)]   if m_modeler
+      http-request set-path %[path,regsub(^/connectors,)]    if m_connectors
+
+      use_backend bem_orchestration if m_orch
+      use_backend bem_optimize      if m_optimize
+      use_backend bem_identity      if m_identity
+      use_backend bem_console       if m_console
+      use_backend bem_modeler       if m_modeler
+      use_backend bem_connectors    if m_connectors
+      default_backend bem_noop
+
+    backend bem_orchestration
+      server s1 {{ $r }}-zeebe-gateway:9600 check resolvers kube-dns init-addr none
+    backend bem_optimize
+      server s1 {{ $r }}-optimize:8092 check resolvers kube-dns init-addr none
+    backend bem_identity
+      server s1 {{ $r }}-identity:82 check resolvers kube-dns init-addr none
+    backend bem_console
+      server s1 {{ $r }}-console:9100 check resolvers kube-dns init-addr none
+    backend bem_modeler
+      server s1 {{ $r }}-web-modeler-restapi:8091 check resolvers kube-dns init-addr none
+    backend bem_connectors
+      server s1 {{ $r }}-connectors:8080 check resolvers kube-dns init-addr none
+    backend bem_noop
+      http-request return status 404 content-type text/plain string "unknown monitoring path (use /<app>/actuator/...)\n"
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -166,6 +227,9 @@ spec:
             - { name: https, containerPort: 8443 }
 {{- end }}
             - { name: grpc, containerPort: 26500 }
+{{- if $h.monitoring.enabled }}
+            - { name: monitoring, containerPort: 9090 }
+{{- end }}
             - { name: stats, containerPort: 8404 }
           readinessProbe:
             httpGet: { path: /healthz, port: 8404 }
@@ -241,4 +305,10 @@ spec:
       port: {{ $h.service.grpcPort }}
       targetPort: 26500
       protocol: TCP
+{{- if $h.monitoring.enabled }}
+    - name: monitoring
+      port: {{ $h.monitoring.port }}
+      targetPort: 9090
+      protocol: TCP
+{{- end }}
 {{- end }}

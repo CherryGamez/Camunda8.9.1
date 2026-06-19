@@ -24,9 +24,59 @@ Each module is configured with the matching `contextPath` (e.g.
 correct links — HAProxy passes the full path through without rewriting.
 
 ## Ports
-- HAProxy container binds **8080** (HTTP), **26500** (gRPC), **8404** (stats/health) — all unprivileged, so it runs **non-root, read-only rootfs**.
-- The Service maps external **80 → 8080** and **26500 → 26500** (`haproxy.service.httpPort/grpcPort`).
+- HAProxy container binds **8080** (HTTP), **8443** (HTTPS), **26500** (gRPC), **9090** (monitoring), **8404** (stats/health) — all unprivileged, so it runs **non-root, read-only rootfs**.
+- The Service maps external **80 → 8080**, **443 → 8443**, **26500 → 26500**, **9090 → 9090** (`haproxy.service.*` / `haproxy.monitoring.port`).
 - `GET /healthz` on 8404 backs the readiness/liveness probes; `/stats` exposes the HAProxy stats page (cluster-internal).
+
+## Monitoring / management endpoints (Spring Boot actuator)
+Every Camunda app's management port is exposed through HAProxy on a **dedicated
+monitoring port (9090)**, under a per-app path prefix that HAProxy strips before
+forwarding, so the backend receives the native `/actuator/...` path.
+
+| Monitoring URL (port 9090) | Backend Service | Mgmt port | Endpoints |
+|---|---|---|---|
+| `/orchestration/actuator/**` | `camunda-zeebe-gateway` | 9600 | health, prometheus |
+| `/optimize/actuator/**` | `camunda-optimize` | 8092 | health, prometheus |
+| `/identity/actuator/**` | `camunda-identity` | 82 | health, prometheus |
+| `/console/actuator/**` | `camunda-console` | 9100 | health, prometheus |
+| `/web-modeler/actuator/**` | `camunda-web-modeler-restapi` | 8091 | health, prometheus |
+| `/connectors/actuator/**` | `camunda-connectors` | 8080 | health, prometheus |
+| `/healthz` | HAProxy itself | — | 200 OK |
+
+Examples:
+```bash
+curl http://<host>:9090/orchestration/actuator/health
+curl http://<host>:9090/orchestration/actuator/prometheus
+curl http://<host>:9090/optimize/actuator/prometheus
+```
+
+Prometheus scrape config (one job per app, since each has its own prefix):
+```yaml
+- job_name: camunda-orchestration
+  metrics_path: /orchestration/actuator/prometheus
+  static_configs: [{ targets: ["camunda-haproxy.camunda.svc:9090"] }]
+- job_name: camunda-optimize
+  metrics_path: /optimize/actuator/prometheus
+  static_configs: [{ targets: ["camunda-haproxy.camunda.svc:9090"] }]
+# ...identity, console, web-modeler, connectors likewise
+```
+
+```yaml
+haproxy:
+  monitoring:
+    enabled: true
+    port: 9090
+    allowedCidrs: []      # e.g. ["10.0.0.0/8"] — restrict to Prometheus networks
+```
+
+> **SECURITY**: actuator endpoints can expose runtime/config details. Keep port
+> 9090 internal: set `monitoring.allowedCidrs` (HAProxy `src` ACL denies all
+> others) and/or a NetworkPolicy so only your Prometheus can reach it. Do **not**
+> map 9090 on a public LoadBalancer.
+>
+> Alternative: if you run the **Prometheus Operator**, you can scrape the pods
+> directly instead of via HAProxy by setting `camunda-platform.prometheusServiceMonitor.enabled=true`.
+
 
 ## Configuration (values)
 ```yaml

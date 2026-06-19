@@ -135,6 +135,21 @@ haproxy:
     redirectHttp: true
     openshiftServiceCA: true          # OpenShift mints the serving cert for the Service
     secretName: camunda-haproxy-tls   # kubernetes.io/tls secret HAProxy mounts
+  # Monitoring entry point: exposes each app's Spring Boot management endpoints
+  # (/actuator/health, /actuator/prometheus, ...) through HAProxy on a dedicated
+  # port, under a per-app path prefix that is stripped before the backend:
+  #   :9090/orchestration/actuator/prometheus  -> camunda-zeebe-gateway:9600
+  #   :9090/optimize/actuator/prometheus       -> camunda-optimize:8092
+  #   :9090/identity/actuator/prometheus       -> camunda-identity:82
+  #   :9090/console/actuator/health            -> camunda-console:9100
+  #   :9090/web-modeler/actuator/health        -> camunda-web-modeler-restapi:8091
+  #   :9090/connectors/actuator/prometheus     -> camunda-connectors:8080
+  # SECURITY: actuator can leak runtime details — keep this port internal. Use
+  # allowedCidrs (HAProxy src ACL) and/or a NetworkPolicy so only Prometheus scrapes it.
+  monitoring:
+    enabled: true
+    port: 9090
+    allowedCidrs: []                  # e.g. ["10.0.0.0/8"]; empty = allow all
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits: { cpu: "500m", memory: "256Mi" }

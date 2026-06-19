@@ -49,6 +49,9 @@ TLS.
   every agent + app container; `VAULT_CACERT` points at the bundle.
 - HAProxy single entry point: path routing + Zeebe gRPC TCP + TLS via service-ca
   serving cert (`service.beta.openshift.io/serving-cert-secret-name`).
+- HAProxy **monitoring port 9090**: per-app actuator routes (health + prometheus)
+  with path-prefix rewrite to each component's management port; optional
+  `allowedCidrs` src-ACL. Validated with `haproxy -c`.
 - `.gitlab-ci.yml`: `helm template` → yq converts Helm hooks → ArgoCD PreSync +
   sync-waves → kubeconform → commit to GitOps repo.
 
